@@ -1,0 +1,28 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "allowJs": false,
+    "jsx": "preserve",
+    "noEmit": true,
+    "incremental": true,
+    "plugins": [{ "name": "next" }],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@open-think/core": ["../../packages/core/src/index.ts"],
+      "@open-think/llm": ["../../packages/llm/src/index.ts"],
+      "@open-think/mcp": ["../../packages/mcp/src/index.ts"],
+      "@open-think/memory": ["../../packages/memory/src/index.ts"],
+      "@open-think/network": ["../../packages/network/src/index.ts"],
+      "@open-think/retrieval": ["../../packages/retrieval/src/index.ts"],
+      "@open-think/sandbox": ["../../packages/sandbox/src/index.ts"],
+      "@open-think/state": ["../../packages/state/src/index.ts"],
+      "@open-think/storage": ["../../packages/storage/src/index.ts"],
+      "@open-think/tasks": ["../../packages/tasks/src/index.ts"],
+      "@open-think/terminal": ["../../packages/terminal/src/index.ts"],
+      "@open-think/ui": ["../../packages/ui/src/index.ts"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}

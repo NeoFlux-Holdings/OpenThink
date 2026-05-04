@@ -1,0 +1,24 @@
+{
+  "name": "@open-think/starter-personal-agent",
+  "version": "0.3.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-think/core": "workspace:*",
+    "@open-think/llm": "workspace:*",
+    "@open-think/mcp": "workspace:*",
+    "@open-think/retrieval": "workspace:*",
+    "@open-think/storage": "workspace:*",
+    "@open-think/tasks": "workspace:*",
+    "@open-think/terminal": "workspace:*",
+    "@cloudflare/ai-chat": "^0.6.2",
+    "agents": "^0.12.3",
+    "ai": "^6.0.174",
+    "workers-ai-provider": "^3.1.13"
+  }
+}

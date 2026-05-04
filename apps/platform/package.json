@@ -1,0 +1,43 @@
+{
+  "name": "@open-think/platform",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "build:worker": "opennextjs-cloudflare build",
+    "provision:cf": "node ../../tools/provision-platform.mjs",
+    "preview:cf": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "deploy:cf": "pnpm run provision:cf && opennextjs-cloudflare build --config wrangler.generated.jsonc && opennextjs-cloudflare deploy --config wrangler.generated.jsonc",
+    "upload:cf": "pnpm run provision:cf && opennextjs-cloudflare build --config wrangler.generated.jsonc && opennextjs-cloudflare upload --config wrangler.generated.jsonc",
+    "db:migrate:remote": "pnpm run provision:cf",
+    "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
+    "dev": "next dev",
+    "lint": "next lint",
+    "start": "next start",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-think/core": "workspace:*",
+    "@open-think/llm": "workspace:*",
+    "@open-think/mcp": "workspace:*",
+    "@open-think/sandbox": "workspace:*",
+    "@open-think/state": "workspace:*",
+    "@open-think/storage": "workspace:*",
+    "@open-think/sync": "workspace:*",
+    "@open-think/terminal": "workspace:*",
+    "@open-think/ui": "workspace:*",
+    "@opennextjs/cloudflare": "latest",
+    "lucide-react": "latest",
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "streamdown": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "wrangler": "latest"
+  }
+}

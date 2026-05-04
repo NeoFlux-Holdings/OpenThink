@@ -1,0 +1,51 @@
+{
+  "name": "open-think-personal-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "ai": { "binding": "AI" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "AGENT_DO", "class_name": "AgentDO" },
+      { "name": "CHAT_DO", "class_name": "ChatDO" },
+      { "name": "TERMINAL_DO", "class_name": "TerminalDO" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AgentDO", "ChatDO", "TerminalDO"]
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "AGENT_STORAGE",
+      "bucket_name": "open-think-personal-agent-artifacts"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "open-think-personal-agent",
+      "database_id": "replace-with-d1-id"
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "open-think-personal-agent-memory"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "TASK_QUEUE",
+        "queue": "open-think-personal-agent-tasks"
+      }
+    ]
+  },
+  "vars": {
+    "OPEN_THINK_STARTER": "personal-agent",
+    "OPEN_THINK_AGENT_NAME": "Personal Agent"
+  }
+}

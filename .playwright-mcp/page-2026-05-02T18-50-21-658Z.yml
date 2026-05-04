@@ -1,0 +1,231 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - link "open-think deploy" [ref=e4] [cursor=pointer]:
+        - /url: /deploy
+        - img [ref=e6]
+        - generic [ref=e10]:
+          - strong [ref=e11]: open-think
+          - generic [ref=e12]: beta2
+      - navigation "Primary navigation" [ref=e13]:
+        - link "Deploy" [ref=e14] [cursor=pointer]:
+          - /url: /deploy
+          - img [ref=e15]
+          - generic [ref=e17]: Deploy
+        - link "Chat" [ref=e18] [cursor=pointer]:
+          - /url: /chat
+          - img [ref=e19]
+          - generic [ref=e22]: Chat
+        - link "Terminal" [ref=e23] [cursor=pointer]:
+          - /url: /terminal
+          - img [ref=e24]
+          - generic [ref=e27]: Terminal
+        - link "Sync" [ref=e28] [cursor=pointer]:
+          - /url: /sync
+          - img [ref=e29]
+          - generic [ref=e33]: Sync
+        - link "Admin" [ref=e34] [cursor=pointer]:
+          - /url: /admin
+          - img [ref=e35]
+          - generic [ref=e38]: Admin
+      - generic "Platform status" [ref=e39]: Cloudflare native
+    - main [ref=e41]:
+      - region "Launch your own personal agent on Cloudflare." [ref=e42]:
+        - generic [ref=e43]:
+          - generic [ref=e44]: Cloudflare-native agent OS
+          - heading "Launch your own personal agent on Cloudflare." [level=1] [ref=e45]
+          - paragraph [ref=e46]: "`open-think` gives each user one all-in-one agent for coding, chat, messaging tools, memory, files, tasks, and terminal handoff. The agent is deployed into the user's Cloudflare account, not the platform owner's account."
+          - generic [ref=e47]:
+            - link "Start deployment" [ref=e48] [cursor=pointer]:
+              - /url: "#deploy-console"
+              - text: Start deployment
+              - img [ref=e49]
+            - link "Terminal surface" [ref=e51] [cursor=pointer]:
+              - /url: /terminal
+              - text: Terminal surface
+              - img [ref=e52]
+        - complementary "Platform architecture summary" [ref=e55]:
+          - generic [ref=e56]:
+            - generic [ref=e57]:
+              - heading "Three-layer runtime" [level=2] [ref=e58]
+              - paragraph [ref=e59]: Worker routing, Durable Object coordination, Container execution.
+            - img [ref=e60]
+          - generic [ref=e63]:
+            - generic [ref=e64]:
+              - strong [ref=e65]: "4"
+              - generic [ref=e66]: Managed pathways later
+            - generic [ref=e67]:
+              - strong [ref=e68]: "1"
+              - generic [ref=e69]: Personal agent template
+            - generic [ref=e70]:
+              - strong [ref=e71]: "3"
+              - generic [ref=e72]: Runtime layers
+            - generic [ref=e73]:
+              - strong [ref=e74]: 10m
+              - generic [ref=e75]: Default container keepAlive
+      - region "Deployment console" [ref=e76]:
+        - generic [ref=e77]:
+          - generic [ref=e78]:
+            - generic [ref=e79]: Launch model
+            - heading "Deploy into your Cloudflare account" [level=2] [ref=e80]
+            - paragraph [ref=e81]: Best for public self-service users
+          - generic [ref=e82]:
+            - listbox "Deployment pathways" [ref=e83]:
+              - option "User owned Launch my agent Deploy one all-in-one personal agent into your own Cloudflare account with a scoped token. Best for public self-service users" [selected] [ref=e84] [cursor=pointer]:
+                - generic [ref=e85]:
+                  - generic [ref=e86]:
+                    - text: User owned
+                    - heading "Launch my agent" [level=3] [ref=e87]
+                  - img [ref=e88]
+                - paragraph [ref=e92]: Deploy one all-in-one personal agent into your own Cloudflare account with a scoped token.
+                - generic [ref=e93]: Best for public self-service users
+              - option "Zero touch Deploy with Stripe Create billing, account, spend limit, and first agent without a terminal. Best for non-technical owners" [ref=e94] [cursor=pointer]:
+                - generic [ref=e95]:
+                  - generic [ref=e96]:
+                    - text: Zero touch
+                    - heading "Deploy with Stripe" [level=3] [ref=e97]
+                  - img [ref=e98]
+                - paragraph [ref=e100]: Create billing, account, spend limit, and first agent without a terminal.
+                - generic [ref=e101]: Best for non-technical owners
+              - option "GitHub OAuth Deploy to Cloudflare Fork the starter, configure Actions, and deploy from a repository. Best for builders with GitHub" [ref=e102] [cursor=pointer]:
+                - generic [ref=e103]:
+                  - generic [ref=e104]:
+                    - text: GitHub OAuth
+                    - heading "Deploy to Cloudflare" [level=3] [ref=e105]
+                  - img [ref=e106]
+                - paragraph [ref=e110]: Fork the starter, configure Actions, and deploy from a repository.
+                - generic [ref=e111]: Best for builders with GitHub
+              - option "MCP handoff Agentic Provisioning Give a coding agent a scoped prompt and Cloudflare MCP surface. Best for AI-assisted teams" [ref=e112] [cursor=pointer]:
+                - generic [ref=e113]:
+                  - generic [ref=e114]:
+                    - text: MCP handoff
+                    - heading "Agentic Provisioning" [level=3] [ref=e115]
+                  - img [ref=e116]
+                - paragraph [ref=e119]: Give a coding agent a scoped prompt and Cloudflare MCP surface.
+                - generic [ref=e120]: Best for AI-assisted teams
+              - option "White label Partner API Provision under a formal partner account and own the tenant UX. Best for platform partners" [ref=e121] [cursor=pointer]:
+                - generic [ref=e122]:
+                  - generic [ref=e123]:
+                    - text: White label
+                    - heading "Partner API" [level=3] [ref=e124]
+                  - img [ref=e125]
+                - paragraph [ref=e129]: Provision under a formal partner account and own the tenant UX.
+                - generic [ref=e130]: Best for platform partners
+            - generic [ref=e131]:
+              - img [ref=e132]
+              - generic [ref=e135]: Public users deploy with their own Cloudflare credentials. Platform owner credentials are not used for self-service agents.
+        - generic [ref=e136]:
+          - generic [ref=e137]:
+            - generic [ref=e138]:
+              - generic [ref=e139]: User owned
+              - heading "Launch my agent" [level=2] [ref=e140]
+              - paragraph [ref=e141]: Deploy one all-in-one personal agent into your own Cloudflare account with a scoped token.
+            - generic [ref=e143]:
+              - generic "Self-service launch requirements" [ref=e144]:
+                - generic [ref=e145]:
+                  - img [ref=e146]
+                  - generic [ref=e149]:
+                    - strong [ref=e150]: Token verifies
+                    - generic [ref=e151]: We read the account, owner email, and zones after you paste the token.
+                - generic [ref=e152]:
+                  - img [ref=e153]
+                  - generic [ref=e157]:
+                    - strong [ref=e158]: Access protected
+                    - generic [ref=e159]: The agent is locked to the account email by default.
+                - generic [ref=e160]:
+                  - img [ref=e161]
+                  - generic [ref=e164]:
+                    - strong [ref=e165]: Kimi default
+                    - generic [ref=e166]: Cloudflare's listed Kimi model is selected for agentic coding unless you choose another model.
+                - generic [ref=e167]:
+                  - img [ref=e168]
+                  - generic [ref=e172]:
+                    - strong [ref=e173]: Spend guardrail
+                    - generic [ref=e174]: Self-service launch is capped at $100 until billing automation is connected.
+              - generic [ref=e175]:
+                - strong [ref=e176]: Credential automation
+                - paragraph [ref=e177]: Create a scoped token, paste it here, then verify. Verification fills account and Access email defaults before launch.
+                - paragraph [ref=e178]:
+                  - text: Confirm Cloudflare shows
+                  - strong [ref=e179]: Account - Workers R2 Storage - Edit
+                  - text: and, for custom domains,
+                  - strong [ref=e180]: Zone - DNS - Edit
+                  - text: plus
+                  - strong [ref=e181]: Zone - Workers Routes - Edit
+                  - text: .
+                - link "Create scoped token" [ref=e182] [cursor=pointer]:
+                  - /url: https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22cloudchamber%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22queues%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22vectorize%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_ai%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22access%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22user_details%22%2C%22type%22%3A%22read%22%7D%5D&accountId=*&zoneId=all&name=Open+Think+-+My+Personal+Agent
+                  - text: Create scoped token
+                  - img [ref=e183]
+                - group [ref=e187]:
+                  - generic "Included permissions" [ref=e188] [cursor=pointer]
+              - generic [ref=e189]:
+                - generic [ref=e190]: Agent name
+                - textbox "Agent name" [ref=e191]: My Personal Agent
+                - generic [ref=e192]:
+                  - text: This is also used for the Worker name, for example
+                  - code [ref=e193]: open-think-tomtom-7eazhw
+                  - text: .
+              - generic [ref=e194]:
+                - generic [ref=e195]: Scoped Cloudflare API token
+                - generic [ref=e196]:
+                  - textbox "Scoped Cloudflare API token" [ref=e197]
+                  - button "Verify" [disabled] [ref=e198]
+                - generic [ref=e199]: Used for provisioning and stored as a secret on the user-owned Worker for Cloudflare MCP/API operations.
+              - generic [ref=e200]:
+                - generic [ref=e201]: Access owner email
+                - textbox "Access owner email" [ref=e202]:
+                  - /placeholder: Filled from token verification
+                - generic [ref=e203]: Optional before verification. By default the agent is locked to the email associated with the Cloudflare token.
+              - generic [ref=e204]:
+                - generic [ref=e205]: Additional Access emails
+                - textbox "Additional Access emails" [ref=e206]:
+                  - /placeholder: teammate@example.com, ops@example.com
+              - generic [ref=e207]:
+                - generic [ref=e208]: Default model
+                - combobox "Default model" [ref=e209]:
+                  - option "Kimi K2.5" [selected]
+                  - option "Llama 3.1 8B Instruct"
+                  - option "Mistral Small 3.1"
+                - generic [ref=e210]: Recommended for long-horizon coding, tool use, and agent workflows.
+              - generic [ref=e211]:
+                - checkbox "Add an optional custom domain or subdomain for this agent." [ref=e212]
+                - generic [ref=e213]: Add an optional custom domain or subdomain for this agent.
+              - generic [ref=e214]:
+                - generic [ref=e215]: Monthly spend guardrail
+                - spinbutton "Monthly spend guardrail" [ref=e216]: "100"
+              - button "Launch my personal agent" [disabled] [ref=e217]:
+                - img [ref=e218]
+                - text: Launch my personal agent
+          - generic [ref=e220]:
+            - generic [ref=e221]:
+              - generic [ref=e222]: SSE progress
+              - heading "Deployment state" [level=2] [ref=e223]
+              - paragraph [ref=e224]: No deployment running
+            - generic [ref=e225]:
+              - generic "Deployment progress" [ref=e226]
+              - generic "Automation status" [ref=e227]:
+                - generic [ref=e228]:
+                  - generic [ref=e229]: Mode
+                  - strong [ref=e230]: loading
+                - generic [ref=e231]:
+                  - generic [ref=e232]: Provisioner
+                  - strong [ref=e233]: loading
+                - generic [ref=e234]:
+                  - generic [ref=e235]: State store
+                  - strong [ref=e236]: loading
+                - generic [ref=e237]:
+                  - generic [ref=e238]: Models
+                  - strong [ref=e239]: loading
+              - generic "Planned Cloudflare resources" [ref=e240]:
+                - generic [ref=e241]: Resource names appear after planning.
+              - generic [ref=e243]:
+                - img [ref=e245]
+                - generic [ref=e254]:
+                  - strong [ref=e255]: Deployment idle
+                  - generic [ref=e256]: SSE events will appear as the route emits provisioning stages.
+            - button "Reset state" [disabled] [ref=e258]:
+              - img [ref=e259]
+              - text: Reset state
+  - button "Open Next.js Dev Tools" [ref=e267] [cursor=pointer]:
+    - img [ref=e268]

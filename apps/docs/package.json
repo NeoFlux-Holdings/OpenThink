@@ -1,0 +1,17 @@
+{
+  "name": "@open-think/docs",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vitepress build docs",
+    "dev": "vitepress dev docs",
+    "lint": "tsc --noEmit",
+    "test": "node -e \"console.log('No docs tests')\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "vitepress": "latest",
+    "typescript": "latest"
+  }
+}

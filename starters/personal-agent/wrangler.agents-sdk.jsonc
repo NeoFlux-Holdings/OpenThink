@@ -1,0 +1,50 @@
+{
+  "name": "open-think-personal-agent-sdk",
+  "main": "src/agents-sdk.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "PersonalChatAgent", "class_name": "PersonalChatAgent" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "agents-sdk-v1",
+      "new_sqlite_classes": ["PersonalChatAgent"]
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "AGENT_STORAGE",
+      "bucket_name": "open-think-personal-agent-artifacts"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "open-think-personal-agent",
+      "database_id": "replace-with-d1-id"
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "open-think-personal-agent-memory"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "TASK_QUEUE",
+        "queue": "open-think-personal-agent-tasks"
+      }
+    ]
+  },
+  "vars": {
+    "OPEN_THINK_STARTER": "personal-agent",
+    "OPEN_THINK_AGENT_NAME": "Personal Agent",
+    "OPEN_THINK_DEFAULT_MODEL": "@cf/moonshotai/kimi-k2.5"
+  }
+}

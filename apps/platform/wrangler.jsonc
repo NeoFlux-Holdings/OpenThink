@@ -1,0 +1,83 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "open-think-platform",
+  "main": "src/worker/cloudflare-entry.ts",
+  "compatibility_date": "2026-04-20",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "containers": [
+    {
+      "class_name": "AgentContainer",
+      "image": "./Dockerfile",
+      "instance_type": "standard-2",
+      "max_instances": 10
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ChatDO",
+        "name": "CHAT_DO"
+      },
+      {
+        "class_name": "TerminalDO",
+        "name": "TERMINAL_DO"
+      },
+      {
+        "class_name": "AgentDO",
+        "name": "AGENT_DO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ChatDO", "TerminalDO", "AgentDO"]
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "r2_buckets": [
+    {
+      "binding": "AGENT_STORAGE",
+      "bucket_name": "open-think-agents"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "open-think-platform",
+      "database_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "open-think-memory"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "DEPLOYMENT_QUEUE",
+        "queue": "open-think-deployments"
+      }
+    ]
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "open-think-platform"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
+}
