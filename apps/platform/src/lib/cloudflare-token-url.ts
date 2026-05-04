@@ -17,7 +17,15 @@ export const openThinkTokenPermissions: CloudflareTokenPermissionPreset[] = [
     key: "cloudchamber",
     type: "edit",
     label: "Containers Edit",
-    reason: "Provision Container-backed runtime support when available."
+    reason: "Provision early Container-backed runtime support where Cloudflare still exposes this as Cloudchamber."
+  },
+  {
+    key: "containers",
+    type: "edit",
+    label: "Containers Edit",
+    reason: "Provision Container-backed services and Sandbox runtimes on Workers Paid accounts.",
+    manualVerification:
+      "If Cloudflare does not preselect this, manually add Account > Containers > Edit."
   },
   {
     key: "d1",
@@ -52,6 +60,30 @@ export const openThinkTokenPermissions: CloudflareTokenPermissionPreset[] = [
     type: "read",
     label: "Workers AI Read",
     reason: "Bind Workers AI as the default model provider."
+  },
+  {
+    key: "ai_gateway",
+    type: "edit",
+    label: "AI Gateway Edit",
+    reason: "Let the agent create or update AI Gateway routes for BYOK/provider routing when requested.",
+    manualVerification:
+      "If Cloudflare does not preselect this, manually add Account > AI Gateway > Edit."
+  },
+  {
+    key: "cloudflare_pages",
+    type: "edit",
+    label: "Cloudflare Pages Edit",
+    reason: "Let the agent create and update Pages projects for static frontends and full-stack apps.",
+    manualVerification:
+      "If Cloudflare does not preselect this, manually add Account > Cloudflare Pages > Edit."
+  },
+  {
+    key: "workers_kv_storage",
+    type: "edit",
+    label: "Workers KV Storage Edit",
+    reason: "Let the agent provision KV namespaces when a new app needs low-latency key-value state.",
+    manualVerification:
+      "If Cloudflare does not preselect this, manually add Account > Workers KV Storage > Edit."
   },
   {
     key: "access",

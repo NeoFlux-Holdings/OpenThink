@@ -19,6 +19,11 @@ describe("buildOpenThinkTokenUrl", () => {
     expect(permissions).toContainEqual({ key: "workers_scripts", type: "edit" });
     expect(permissions).toContainEqual({ key: "workers_r2", type: "edit" });
     expect(permissions).toContainEqual({ key: "access", type: "edit" });
+    expect(permissions).toContainEqual({ key: "containers", type: "edit" });
+    expect(permissions).toContainEqual({ key: "cloudchamber", type: "edit" });
+    expect(permissions).toContainEqual({ key: "cloudflare_pages", type: "edit" });
+    expect(permissions).toContainEqual({ key: "workers_kv_storage", type: "edit" });
+    expect(permissions).toContainEqual({ key: "ai_gateway", type: "edit" });
     expect(permissions).toContainEqual({ key: "d1", type: "edit" });
     expect(permissions).toContainEqual({ key: "dns", type: "edit" });
     expect(permissions).toContainEqual({ key: "workers_routes", type: "edit" });
