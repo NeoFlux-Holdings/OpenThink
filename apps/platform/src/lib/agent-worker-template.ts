@@ -345,6 +345,8 @@ async function handleChat(request, env) {
         "You have direct awareness of this deployment through the runtime snapshot below. Do not say you lack the script name, D1 memory table, bindings, update strategy, or Cloudflare account context when it is present in that snapshot.",
         "You have explicit Cloudflare platform skills in the runtime snapshot. When asked about Sandbox, Containers, Workers, Pages, or deploying new software, use those skills. Do not claim Containers or Sandbox are impossible; say whether they are available in this runtime, what account plan/bindings are required, and how you would add them.",
         "Decision rule: Workers/Pages first for HTTP apps, APIs, static sites, scheduled jobs, queues, and edge-native integrations. Sandbox for untrusted or agent-generated code execution, command execution, file work, browser terminals, preview URLs, data analysis, and ephemeral IDE/CI workflows. Containers for custom runtimes, existing Docker images, long-running services, heavier CPU/memory/disk, Linux tools, or servers that Workers cannot run. Durable Objects coordinate stateful sessions and per-user instances. R2, D1, Queues, Vectorize, AI, Workflows, and Access compose around these choices.",
+        "Builder workflow: first classify the requested software, then propose the smallest Cloudflare architecture, list required permissions/bindings/resources, identify paid-plan or beta gates, create a deployment plan, ask before cost-bearing/destructive operations, then use MCP/API/update tools to provision or generate the code. If the current runtime lacks a binding, explain the exact binding/config update needed instead of saying the feature is unavailable.",
+        "Safety workflow for executable code: never run untrusted code in the Worker isolate. Prefer Sandbox for short-lived command/code execution and Containers for custom runtimes or long-running services. For secrets, use Worker secrets and never echo values. For public apps, include Access, custom domain/DNS, spend guardrails, logging, rollback, and update strategy.",
         "D1 memory is available through the built-in memory_list tool and the /memory endpoint. If asked what memory says, answer from recent D1 memory rows or call memory_list. Do not ask the owner for the D1 database id for this agent's own memory.",
         "R2 files are available through files_list and /files. Tasks are available through queue_task and /tasks. Runtime and update status are available through runtime_status and /runtime/context.",
         "Vectorize is provisioned as semantic memory when the VECTORIZE binding is present; explain that vector query wiring is a next runtime tool if no direct vector query tool is available.",
@@ -812,7 +814,7 @@ function cloudflarePlatformSkills(env) {
   const sandboxBound = Boolean(env.Sandbox || env.SANDBOX || env.OPEN_THINK_SANDBOX_ENABLED === "true");
   const containerBound = Boolean(env.OPEN_THINK_CONTAINER_ENABLED === "true" || env.AGENT_CONTAINER || env.MY_CONTAINER);
   return {
-    version: "2026-05-04",
+    version: "2026-05-04.2",
     currentRuntime: {
       runsIn: "Cloudflare Worker",
       canSelfModifyThroughWorkerUpload: Boolean(env.OPEN_THINK_CF_API_TOKEN),
@@ -820,6 +822,85 @@ function cloudflarePlatformSkills(env) {
       containerBound,
       paidPlanRequiredForSandboxAndContainers: true
     },
+    operatingPrinciples: [
+      "Prefer the smallest Cloudflare primitive that satisfies the product requirement.",
+      "Treat Workers/Pages as the default deploy targets for web apps and APIs.",
+      "Never execute untrusted code in the Worker isolate; use Sandbox or Containers.",
+      "Separate planning from execution: explain resources, permissions, cost/plan gates, rollback, and security before provisioning.",
+      "Use secrets for credentials, plain-text vars only for non-sensitive configuration, and never claim secret values can be read back.",
+      "For owner-requested Cloudflare changes, use MCP search first when unsure, then execute only after confirmation for destructive or expensive operations."
+    ],
+    requiredTokenCoverage: {
+      currentPreset: [
+        "Workers Scripts Edit",
+        "Containers Edit / Cloudchamber Edit",
+        "Cloudflare Pages Edit",
+        "Workers KV Storage Edit",
+        "D1 Edit",
+        "Workers R2 Storage Edit",
+        "Queues Edit",
+        "Vectorize Edit",
+        "Workers AI Read",
+        "AI Gateway Edit",
+        "Access Apps and Policies Edit",
+        "Zone Read",
+        "DNS Edit",
+        "Workers Routes Edit",
+        "Account Settings Read",
+        "User Details Read"
+      ],
+      addLaterWhenNeeded: [
+        "Hyperdrive Edit for Postgres/database connectivity",
+        "Workflows Edit if adding long-running workflow orchestration",
+        "Turnstile Edit for bot protection",
+        "Images/Stream Edit for media apps",
+        "Observability/log permissions if the owner wants tailing or log sinks"
+      ]
+    },
+    builderPlaybooks: [
+      {
+        id: "new-cloudflare-app",
+        trigger: "Owner asks to create or deploy new software on Cloudflare.",
+        steps: [
+          "Clarify app type, runtime needs, state, data, auth, domain, expected traffic, and cost tolerance.",
+          "Choose Workers, Pages, Sandbox, Containers, or a combination using the decision matrix.",
+          "List resources/bindings: D1, R2, KV, Queues, Vectorize, AI Gateway, Access, DNS/routes, Durable Objects, Workflows.",
+          "Check token/plan readiness and call out missing permissions or paid-plan gates.",
+          "Generate code and wrangler config, then deploy through the platform update flow or Cloudflare API.",
+          "Verify health, route/domain, Access policy, rollback path, logs, and update source."
+        ]
+      },
+      {
+        id: "sandbox-code-execution",
+        trigger: "Owner wants to run code, tests, shell commands, notebooks, or agent-generated code.",
+        steps: [
+          "Use Sandbox SDK if the code is untrusted, interactive, short-lived, or needs files/terminal/preview URLs.",
+          "Add @cloudflare/sandbox, export Sandbox, add Durable Object binding/migration, and expose exec/files/terminal endpoints.",
+          "Persist artifacts to R2 and metadata to D1; proxy credentials from Worker secrets instead of exposing them to the sandbox.",
+          "Require explicit confirmation for package installs, network-heavy jobs, destructive file operations, or long-running commands."
+        ]
+      },
+      {
+        id: "containerized-service",
+        trigger: "Owner needs Docker, custom Linux runtime, an existing server app, heavier CPU/memory/disk, or long-running service behavior.",
+        steps: [
+          "Use Containers directly with @cloudflare/containers and a Container subclass.",
+          "Define Dockerfile, defaultPort, sleepAfter, instance type, max_instances, Durable Object binding, and migration.",
+          "Route by tenant/session with getContainer(env.CONTAINER, id).fetch(request).",
+          "Protect public routes with Access, set custom domains/routes, and document scale-to-zero/cost behavior."
+        ]
+      },
+      {
+        id: "self-update-and-redeploy",
+        trigger: "Owner asks the agent to change its own code, bindings, or deployed resources.",
+        steps: [
+          "Prefer managed remote updates from the open-think GitHub source and platform reconciler.",
+          "For direct runtime updates, require a verified worker.js bundle and preserve secrets with keep_bindings.",
+          "For bindings/secrets, use /updates/bindings and /secrets; create backing Cloudflare resources first when needed.",
+          "Warn that replacing the current Worker can interrupt the conversation and ask for confirmation before upload."
+        ]
+      }
+    ],
     skills: [
       {
         id: "cloudflare-sandbox",
@@ -921,6 +1002,8 @@ function cloudflarePlatformAdvice(env, input) {
       sandboxBound: skills.currentRuntime.sandboxBound,
       containerBound: skills.currentRuntime.containerBound
     },
+    nextSteps: builderNextSteps(primary),
+    permissionNotes: permissionNotesFor(primary),
     recommendation: platformRecommendation(primary),
     skills
   };
@@ -931,6 +1014,47 @@ function platformRecommendation(primary) {
   if (primary === "sandbox") return "Use Sandbox SDK when the product needs safe code execution, command runs, terminals, previews, or agent-generated code workflows.";
   if (primary === "containers") return "Use Containers directly when the product needs a custom image, full Linux service, or heavier CPU/memory/disk than Workers.";
   return "Use Workers first, then add Durable Objects, D1, R2, Queues, Vectorize, Workflows, Access, Sandbox, or Containers as requirements demand.";
+}
+
+function builderNextSteps(primary) {
+  if (primary === "pages") {
+    return [
+      "Generate frontend app and optional Worker/Functions API.",
+      "Create or update a Pages project.",
+      "Attach custom domain/DNS and Access if private.",
+      "Store app config in Worker/Pages env vars and secrets."
+    ];
+  }
+  if (primary === "sandbox") {
+    return [
+      "Confirm Workers Paid plan and Containers/Sandbox availability.",
+      "Add Sandbox binding and endpoints for exec, files, terminal, previews, and lifecycle.",
+      "Persist artifacts in R2 and metadata in D1.",
+      "Require confirmation for expensive or destructive commands."
+    ];
+  }
+  if (primary === "containers") {
+    return [
+      "Confirm Workers Paid plan and Containers permission.",
+      "Add Dockerfile, Container class, container binding, Durable Object migration, instance type, and max_instances.",
+      "Route requests to getContainer with tenant/session IDs.",
+      "Protect public endpoints with Access and document scale-to-zero behavior."
+    ];
+  }
+  return [
+    "Generate Worker code and wrangler bindings.",
+    "Add D1/R2/KV/Queues/Vectorize/AI Gateway only as required.",
+    "Deploy through the platform update path or Workers Scripts API.",
+    "Verify /health, route/domain, Access, rollback, and logs."
+  ];
+}
+
+function permissionNotesFor(primary) {
+  const common = ["Workers Scripts Edit", "Account Settings Read", "Access Apps and Policies Edit when public/private routes need protection"];
+  if (primary === "pages") return [...common, "Cloudflare Pages Edit", "DNS Edit and Workers Routes Edit for custom domains"];
+  if (primary === "sandbox") return [...common, "Containers Edit or Cloudchamber Edit", "Workers R2 Storage Edit for artifacts", "D1 Edit for session metadata"];
+  if (primary === "containers") return [...common, "Containers Edit or Cloudchamber Edit", "Workers R2 Storage Edit for artifacts or mounted buckets"];
+  return [...common, "D1/R2/KV/Queues/Vectorize/AI Gateway depending on chosen bindings"];
 }
 
 async function runtimeSnapshot(env) {
