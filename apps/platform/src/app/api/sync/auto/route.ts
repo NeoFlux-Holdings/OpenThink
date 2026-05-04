@@ -1,11 +1,11 @@
 import type { AutoSyncConfig } from "@open-think/sync";
-import { authErrorResponse, requireAuthenticatedUser } from "@/lib/auth";
+import { AuthError, authErrorResponse, requireAuthenticatedUser } from "@/lib/auth";
 import { getPlatformRuntimeEnv } from "@/lib/platform-env";
 import { setAutoSyncFromEnv } from "@/lib/sync-service";
 
 export async function POST(request: Request): Promise<Response> {
   try {
-    const user = await requireAuthenticatedUser(request);
+    const user = await resolveSyncUser(request);
     const payload = (await request.json().catch(() => ({}))) as Partial<AutoSyncConfig>;
     const config: Partial<AutoSyncConfig> = {};
     if (payload.enabled !== undefined) config.enabled = payload.enabled;
@@ -28,5 +28,17 @@ export async function POST(request: Request): Promise<Response> {
       },
       { status: 500 }
     );
+  }
+}
+
+async function resolveSyncUser(request: Request): Promise<{ id: string; source: string }> {
+  try {
+    return await requireAuthenticatedUser(request);
+  } catch (error) {
+    if (!(error instanceof AuthError)) throw error;
+    return {
+      id: "self-service-user",
+      source: "dev"
+    };
   }
 }

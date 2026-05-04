@@ -11,7 +11,8 @@ import {
   ListRestart,
   RefreshCw,
   Rocket,
-  Settings2
+  Settings2,
+  ShieldCheck
 } from "lucide-react";
 import type { AutoSyncConfig, SyncAction, SyncResult, SyncStatus } from "@open-think/sync";
 import type {
@@ -31,12 +32,42 @@ const manualActions: Array<{
   { action: "reconcile", label: "Reconcile", icon: RefreshCw }
 ];
 
+const UPDATE_TOKEN_STORAGE_KEY = "open-think.cf-api-token";
+
+type TokenStatus =
+  | { state: "empty"; message: string }
+  | { state: "saved"; message: string }
+  | { state: "checking"; message: string }
+  | { state: "verified"; message: string }
+  | { state: "warning"; message: string }
+  | { state: "error"; message: string };
+
+type TokenVerificationPayload = {
+  inspection?: {
+    userEmail?: string;
+    accounts?: Array<{ id: string; name?: string }>;
+    defaultAccountId?: string;
+    defaultAccessEmail?: string;
+  };
+  permissionIssue?: {
+    error: string;
+    cloudflare?: {
+      requiredPermission?: string;
+    };
+  };
+  error?: string;
+};
+
 export function SyncWorkspace() {
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [result, setResult] = useState<SyncResult | null>(null);
   const [deploymentUpdates, setDeploymentUpdates] = useState<DeploymentUpdateSummary[]>([]);
   const [selectedDeploymentId, setSelectedDeploymentId] = useState("");
   const [updateToken, setUpdateToken] = useState("");
+  const [tokenStatus, setTokenStatus] = useState<TokenStatus>({
+    state: "empty",
+    message: "Paste a Cloudflare API token to unlock updates for deployed agents."
+  });
   const [isLoading, setIsLoading] = useState(true);
   const [isWorking, setIsWorking] = useState<SyncAction | "auto" | null>(null);
   const [isDeploymentWorking, setIsDeploymentWorking] = useState<
@@ -69,8 +100,47 @@ export function SyncWorkspace() {
 
   useEffect(() => {
     void refresh();
-    void loadDeploymentUpdates();
+    const savedToken = readStoredUpdateToken();
+    if (savedToken) {
+      setUpdateToken(savedToken);
+      setTokenStatus({
+        state: "saved",
+        message: "Token loaded from this browser. Verifying it now..."
+      });
+    } else {
+      void loadDeploymentUpdates();
+    }
   }, []);
+
+  useEffect(() => {
+    const token = updateToken.trim();
+    if (!token) {
+      storeUpdateToken("");
+      setTokenStatus({
+        state: "empty",
+        message: "Paste a Cloudflare API token to unlock updates for deployed agents."
+      });
+      return;
+    }
+
+    storeUpdateToken(token);
+    setTokenStatus((current) =>
+      current.state === "verified" || current.state === "warning"
+        ? {
+            state: "saved",
+            message: "Token changed and saved locally. Verify it before updating a Worker."
+          }
+        : current
+    );
+
+    const timeout = window.setTimeout(() => {
+      if (token.length >= 20) {
+        void verifyUpdateToken(token, { refreshTarget: true, silent: true });
+      }
+    }, 850);
+
+    return () => window.clearTimeout(timeout);
+  }, [updateToken]);
 
   async function refresh() {
     setError(null);
@@ -159,11 +229,98 @@ export function SyncWorkspace() {
     }
   }
 
+  async function verifyUpdateToken(
+    token = updateToken,
+    options: { refreshTarget?: boolean; silent?: boolean } = {}
+  ) {
+    const trimmedToken = token.trim();
+    if (!trimmedToken) {
+      setTokenStatus({
+        state: "error",
+        message: "Paste a Cloudflare API token first."
+      });
+      return;
+    }
+
+    if (!options.silent) setDeploymentError(null);
+    setTokenStatus({
+      state: "checking",
+      message: "Verifying token with Cloudflare..."
+    });
+
+    try {
+      const response = await fetch("/api/deployment/verify-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cfApiToken: trimmedToken })
+      });
+      const payload = (await response.json()) as TokenVerificationPayload;
+      if (!response.ok || !payload.inspection) {
+        throw new Error(payload.error ?? "Token verification failed.");
+      }
+
+      storeUpdateToken(trimmedToken);
+      const account =
+        payload.inspection.accounts?.find(
+          (item) => item.id === payload.inspection?.defaultAccountId
+        ) ?? payload.inspection.accounts?.[0];
+      const accountLabel = account
+        ? `${account.name ?? "Cloudflare account"} (${maskCloudflareId(account.id)})`
+        : "Cloudflare account";
+      const email = payload.inspection.defaultAccessEmail ?? payload.inspection.userEmail;
+
+      if (payload.permissionIssue) {
+        setTokenStatus({
+          state: "warning",
+          message: `${accountLabel} verified${
+            email ? ` for ${email}` : ""
+          }, but this token is missing ${
+            payload.permissionIssue.cloudflare?.requiredPermission ?? "a required permission"
+          }.`
+        });
+      } else {
+        setTokenStatus({
+          state: "verified",
+          message: `${accountLabel} verified${email ? ` for ${email}` : ""}. Target refreshed.`
+        });
+      }
+
+      if (options.refreshTarget) {
+        await loadDeploymentUpdates();
+      }
+    } catch (caught) {
+      setTokenStatus({
+        state: "error",
+        message: caught instanceof Error ? caught.message : "Token verification failed."
+      });
+    }
+  }
+
+  function handleUpdateTokenChange(value: string) {
+    setDeploymentError(null);
+    setUpdateToken(value);
+  }
+
+  function clearUpdateToken() {
+    setUpdateToken("");
+    storeUpdateToken("");
+    setTokenStatus({
+      state: "empty",
+      message: "Paste a Cloudflare API token to unlock updates for deployed agents."
+    });
+  }
+
   async function runDeploymentUpdate(
     action: DeploymentUpdateAction,
     autoUpdate?: Partial<AutoSyncConfig>
   ) {
     if (!selectedDeployment) return;
+    if (!selectedDeployment.canUpdateWithoutToken && !updateToken.trim()) {
+      setDeploymentError(
+        "Paste and verify a Cloudflare API token first. This platform only stores a fingerprint after launch."
+      );
+      return;
+    }
 
     setDeploymentError(null);
     setIsDeploymentWorking(action);
@@ -282,6 +439,49 @@ export function SyncWorkspace() {
           <div className="surface-body">
             {deploymentError ? <p className="notice">{deploymentError}</p> : null}
             <div className="form-grid">
+              <div className="field token-first-field">
+                <label htmlFor="deployment-update-token">Cloudflare API token</label>
+                <div className="inline-control token-control">
+                  <input
+                    id="deployment-update-token"
+                    type="password"
+                    value={updateToken}
+                    placeholder={
+                      selectedDeployment?.canUpdateWithoutToken
+                        ? "Configured token available"
+                        : "Paste token to update deployed agents"
+                    }
+                    onChange={(event) => handleUpdateTokenChange(event.target.value)}
+                    onBlur={() =>
+                      updateToken.trim()
+                        ? void verifyUpdateToken(updateToken, { refreshTarget: true })
+                        : undefined
+                    }
+                  />
+                  <button
+                    className="button"
+                    type="button"
+                    disabled={!updateToken.trim() || tokenStatus.state === "checking"}
+                    onClick={() => void verifyUpdateToken(updateToken, { refreshTarget: true })}
+                  >
+                    <ShieldCheck size={16} aria-hidden="true" />
+                    {tokenStatus.state === "checking" ? "Checking" : "Verify"}
+                  </button>
+                </div>
+                <span className="field-hint">
+                  {selectedDeployment?.canUpdateWithoutToken
+                    ? `Using ${selectedDeployment.credentialSource}. You can still paste a token to override it for this update.`
+                    : "Stored only in this browser for update actions; raw user tokens are not stored by the platform after launch."}
+                </span>
+                <div className="token-status" data-state={tokenStatus.state}>
+                  <span>{tokenStatus.message}</span>
+                  {updateToken.trim() ? (
+                    <button type="button" onClick={clearUpdateToken}>
+                      Clear saved token
+                    </button>
+                  ) : null}
+                </div>
+              </div>
               <div className="field">
                 <label htmlFor="deployment-update-target">Deployment</label>
                 <select
@@ -299,25 +499,6 @@ export function SyncWorkspace() {
                     <option value="">No deployments</option>
                   )}
                 </select>
-              </div>
-              <div className="field">
-                <label htmlFor="deployment-update-token">Cloudflare API token</label>
-                <input
-                  id="deployment-update-token"
-                  type="password"
-                  value={updateToken}
-                  placeholder={
-                    selectedDeployment?.canUpdateWithoutToken
-                      ? "Configured token available"
-                      : "Paste only when needed"
-                  }
-                  onChange={(event) => setUpdateToken(event.target.value)}
-                />
-                <span className="field-hint">
-                  {selectedDeployment?.canUpdateWithoutToken
-                    ? `Using ${selectedDeployment.credentialSource}.`
-                    : "Raw user tokens are not stored after launch."}
-                </span>
               </div>
             </div>
             <div className="resource-plan">
@@ -469,4 +650,31 @@ function SyncMetric({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
     </div>
   );
+}
+
+function readStoredUpdateToken(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(UPDATE_TOKEN_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function storeUpdateToken(token: string) {
+  if (typeof window === "undefined") return;
+  try {
+    if (token) {
+      window.localStorage.setItem(UPDATE_TOKEN_STORAGE_KEY, token);
+    } else {
+      window.localStorage.removeItem(UPDATE_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // Browsers can block localStorage in hardened privacy modes.
+  }
+}
+
+function maskCloudflareId(id: string): string {
+  if (id.length <= 12) return id;
+  return `${id.slice(0, 6)}...${id.slice(-6)}`;
 }
