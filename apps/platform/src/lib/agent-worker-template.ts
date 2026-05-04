@@ -39,9 +39,9 @@ const defaultModel = ${defaultModel};
 const modelProvider = ${modelProvider};
 const thinkingLevel = ${thinkingLevel};
 const appHtml = ${appHtml};
-const runtimeAwarenessVersion = "2026-05-04.1";
-const capabilities = ["chat", "coding", "messaging", "files", "memory", "tasks", "terminal", "mcp", "cloudflare-api", "self-update", "binding-management"];
-const endpoints = ["/", "/health", "/manifest", "/chat", "/projects", "/threads", "/messages", "/memory", "/files", "/tasks", "/terminal", "/secrets", "/updates/status", "/updates/remote", "/updates/apply", "/updates/bindings", "/runtime/context", "/cloudflare/status", "/cloudflare/api", "/mcp/cloudflare", "/mcp/servers", "/mcp/tools", "/mcp/call"];
+const runtimeAwarenessVersion = "2026-05-04.2";
+const capabilities = ["chat", "coding", "messaging", "files", "memory", "tasks", "terminal", "mcp", "cloudflare-api", "self-update", "binding-management", "cloudflare-sandbox-planning", "cloudflare-container-planning", "cloudflare-app-deployment-planning"];
+const endpoints = ["/", "/health", "/manifest", "/skills", "/chat", "/projects", "/threads", "/messages", "/memory", "/files", "/tasks", "/terminal", "/secrets", "/updates/status", "/updates/remote", "/updates/apply", "/updates/bindings", "/runtime/context", "/cloudflare/status", "/cloudflare/api", "/mcp/cloudflare", "/mcp/servers", "/mcp/tools", "/mcp/call"];
 
 export default {
   async fetch(request, env) {
@@ -82,6 +82,7 @@ export default {
         cloudflareAccountId: env.OPEN_THINK_CF_ACCOUNT_ID || cloudflareAccountId || null,
         capabilities,
         endpoints,
+        skills: cloudflarePlatformSkills(env),
         mcp: {
           cloudflareApi: {
             serverUrl: "https://mcp.cloudflare.com/mcp",
@@ -100,6 +101,10 @@ export default {
           }
         }
       });
+    }
+
+    if (url.pathname === "/skills") {
+      return Response.json(cloudflarePlatformSkills(env));
     }
 
     if (url.pathname === "/chat" && request.method === "POST") {
@@ -336,8 +341,10 @@ async function handleChat(request, env) {
       role: "system",
       content: [
         "You are " + agentName + ", an open-think personal agent running on Cloudflare.",
-        "You help with coding, messaging, chat, task planning, files, memory, Cloudflare operations, terminal workflows, source updates, and MCP-oriented tool use.",
+        "You help with coding, messaging, chat, task planning, files, memory, Cloudflare operations, terminal workflows, source updates, MCP-oriented tool use, and selecting the right Cloudflare primitive for new software.",
         "You have direct awareness of this deployment through the runtime snapshot below. Do not say you lack the script name, D1 memory table, bindings, update strategy, or Cloudflare account context when it is present in that snapshot.",
+        "You have explicit Cloudflare platform skills in the runtime snapshot. When asked about Sandbox, Containers, Workers, Pages, or deploying new software, use those skills. Do not claim Containers or Sandbox are impossible; say whether they are available in this runtime, what account plan/bindings are required, and how you would add them.",
+        "Decision rule: Workers/Pages first for HTTP apps, APIs, static sites, scheduled jobs, queues, and edge-native integrations. Sandbox for untrusted or agent-generated code execution, command execution, file work, browser terminals, preview URLs, data analysis, and ephemeral IDE/CI workflows. Containers for custom runtimes, existing Docker images, long-running services, heavier CPU/memory/disk, Linux tools, or servers that Workers cannot run. Durable Objects coordinate stateful sessions and per-user instances. R2, D1, Queues, Vectorize, AI, Workflows, and Access compose around these choices.",
         "D1 memory is available through the built-in memory_list tool and the /memory endpoint. If asked what memory says, answer from recent D1 memory rows or call memory_list. Do not ask the owner for the D1 database id for this agent's own memory.",
         "R2 files are available through files_list and /files. Tasks are available through queue_task and /tasks. Runtime and update status are available through runtime_status and /runtime/context.",
         "Vectorize is provisioned as semantic memory when the VECTORIZE binding is present; explain that vector query wiring is a next runtime tool if no direct vector query tool is available.",
@@ -599,6 +606,26 @@ function agentTools() {
     {
       type: "function",
       function: {
+        name: "cloudflare_platform_advice",
+        description: "Choose between Workers, Pages, Sandbox, Containers, Durable Objects, and supporting Cloudflare services for a software or agent deployment.",
+        parameters: {
+          type: "object",
+          properties: {
+            goal: { type: "string", description: "What the owner wants to build or deploy." },
+            needsCodeExecution: { type: "boolean" },
+            needsCustomRuntime: { type: "boolean" },
+            needsLongRunningServer: { type: "boolean" },
+            needsStaticFrontend: { type: "boolean" },
+            needsStatefulSessions: { type: "boolean" },
+            untrustedCode: { type: "boolean" }
+          },
+          required: ["goal"]
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
         name: "mcp_call",
         description: "Call an MCP-compatible tool from the agent runtime.",
         parameters: {
@@ -653,7 +680,7 @@ function extractToolCalls(output, responseText) {
     calls.push({ name: "mcp_call", arguments: { server, name, arguments: args } });
   }
 
-  const builtInXmlCalls = String(responseText ?? "").matchAll(/<invoke\\s+name=["'](runtime_status|memory_list|files_list|queue_task|secret_put|binding_add|update_status)["'][\\s\\S]*?<\\/invoke>/g);
+  const builtInXmlCalls = String(responseText ?? "").matchAll(/<invoke\\s+name=["'](runtime_status|memory_list|files_list|queue_task|secret_put|binding_add|update_status|cloudflare_platform_advice)["'][\\s\\S]*?<\\/invoke>/g);
   for (const match of builtInXmlCalls) {
     const block = match[0];
     const toolName = match[1];
@@ -731,6 +758,14 @@ async function runToolCalls(calls, env) {
       continue;
     }
 
+    if (call.name === "cloudflare_platform_advice") {
+      results.push({
+        tool: "cloudflare_platform_advice",
+        result: cloudflarePlatformAdvice(env, call.arguments ?? {})
+      });
+      continue;
+    }
+
     const args = call.name === "mcp_call" ? call.arguments : { name: call.name, arguments: call.arguments };
     const server = args.server || "cloudflare";
     const toolName = args.name || call.name;
@@ -773,6 +808,131 @@ function runtimeScriptName(env) {
   return env.OPEN_THINK_SCRIPT_NAME || scriptName;
 }
 
+function cloudflarePlatformSkills(env) {
+  const sandboxBound = Boolean(env.Sandbox || env.SANDBOX || env.OPEN_THINK_SANDBOX_ENABLED === "true");
+  const containerBound = Boolean(env.OPEN_THINK_CONTAINER_ENABLED === "true" || env.AGENT_CONTAINER || env.MY_CONTAINER);
+  return {
+    version: "2026-05-04",
+    currentRuntime: {
+      runsIn: "Cloudflare Worker",
+      canSelfModifyThroughWorkerUpload: Boolean(env.OPEN_THINK_CF_API_TOKEN),
+      sandboxBound,
+      containerBound,
+      paidPlanRequiredForSandboxAndContainers: true
+    },
+    skills: [
+      {
+        id: "cloudflare-sandbox",
+        name: "Cloudflare Sandbox SDK",
+        docs: "https://developers.cloudflare.com/sandbox/",
+        status: sandboxBound ? "bound-or-enabled" : "not-bound-yet",
+        paidPlan: "Workers Paid plan required because Sandbox is built on Containers.",
+        whatItIs: "A high-level SDK for secure isolated code execution environments backed by Cloudflare Containers and coordinated from Workers/Durable Objects.",
+        useWhen: [
+          "Need to execute untrusted or agent-generated code safely.",
+          "Need shell commands, Python or Node execution, file operations, code interpreter behavior, background processes, file watching, browser terminals, or preview URLs.",
+          "Need an AI coding agent, code-review bot, data-analysis notebook, test runner, CI job, or cloud IDE session."
+        ],
+        avoidWhen: [
+          "A plain HTTP API, static site, or scheduled task is enough.",
+          "You need a bespoke long-running production service with a custom container image; use Containers directly."
+        ],
+        addToThisAgent: [
+          "Add @cloudflare/sandbox to the generated runtime package.",
+          "Export { Sandbox } from @cloudflare/sandbox in the Worker module.",
+          "Add a Durable Object binding for Sandbox in wrangler config/migrations.",
+          "Expose endpoints for exec, files, terminal WebSocket, previews, and lifecycle.",
+          "Gate expensive/destructive execution behind owner confirmation and spending limits."
+        ]
+      },
+      {
+        id: "cloudflare-containers",
+        name: "Cloudflare Containers",
+        docs: "https://developers.cloudflare.com/containers/",
+        status: containerBound ? "bound-or-enabled" : "not-bound-yet",
+        paidPlan: "Workers Paid plan required.",
+        whatItIs: "A serverless container runtime for running Docker/container images from Workers, with instances addressed and coordinated through Durable Object bindings.",
+        useWhen: [
+          "Need a custom runtime, existing Docker image, native Linux packages, full filesystem, more CPU/memory/disk, or a non-JavaScript server.",
+          "Need long-running or stateful service instances, WebSocket-to-container, SSH/debug workflows, R2 FUSE mounts, or containerized backends.",
+          "Need to deploy software that cannot fit inside Worker limits."
+        ],
+        avoidWhen: [
+          "Workers or Pages can serve the request without a custom runtime.",
+          "The main need is safe code execution for an AI agent; prefer Sandbox first."
+        ],
+        addToThisAgent: [
+          "Add @cloudflare/containers and a Container subclass with defaultPort and sleepAfter.",
+          "Add containers[] and durable_objects.bindings[] in wrangler config plus SQLite migration.",
+          "Build/push the Dockerfile during deploy.",
+          "Route per-user/session IDs to getContainer(env.CONTAINER, id).fetch(request).",
+          "Define scale-to-zero, max_instances, instance type, and Access protections."
+        ]
+      },
+      {
+        id: "cloudflare-deployment-picker",
+        name: "Cloudflare deployment picker",
+        docs: "https://developers.cloudflare.com/",
+        status: "available",
+        useWhen: [
+          "Owner asks where to deploy a new app or service.",
+          "Owner asks whether to use Workers, Pages, Sandbox, Containers, Durable Objects, R2, D1, Queues, Vectorize, Workflows, or Access."
+        ],
+        decisionMatrix: [
+          "Static frontend or docs: Pages, optionally with Functions/Workers for APIs.",
+          "HTTP API, webhook, bot, scheduled job, queue consumer, AI Gateway/router: Workers.",
+          "Per-user state, sessions, WebSocket coordination, singleton controllers: Durable Objects.",
+          "Untrusted code execution, command runner, code interpreter, terminal, test/build job: Sandbox.",
+          "Custom runtime, existing Docker app, heavier Linux service, server needing CPU/memory/disk: Containers.",
+          "Large files/artifacts: R2. Relational data: D1. Background async tasks: Queues/Workflows. Semantic memory/RAG: Vectorize/AutoRAG. Access control: Cloudflare Access."
+        ]
+      }
+    ]
+  };
+}
+
+function cloudflarePlatformAdvice(env, input) {
+  const skills = cloudflarePlatformSkills(env);
+  const goal = String(input.goal ?? "").toLowerCase();
+  const reasons = [];
+  let primary = "workers";
+  if (input.needsStaticFrontend || /static|landing|docs|frontend|site/.test(goal)) {
+    primary = "pages";
+    reasons.push("Static/front-end delivery fits Pages, with Workers/Functions for dynamic APIs.");
+  }
+  if (input.untrustedCode || input.needsCodeExecution || /sandbox|execute code|run code|terminal|python|notebook|ci|tests|build/.test(goal)) {
+    primary = "sandbox";
+    reasons.push("Safe command/code execution and terminal/file workflows fit Sandbox.");
+  }
+  if (input.needsCustomRuntime || input.needsLongRunningServer || /container|docker|server|postgres|redis|native|linux|gpu|binary/.test(goal)) {
+    primary = "containers";
+    reasons.push("Custom runtimes, existing Docker images, or heavier Linux services fit Containers.");
+  }
+  if (input.needsStatefulSessions || /session|websocket|stateful|per-user/.test(goal)) {
+    reasons.push("Durable Objects should coordinate per-user state, sessions, and routing.");
+  }
+  if (reasons.length === 0) reasons.push("Start with Workers because the goal sounds edge-native and request/response oriented.");
+  return {
+    goal: input.goal ?? "",
+    primary,
+    reasons,
+    availableInThisRuntime: {
+      workerApiToken: Boolean(env.OPEN_THINK_CF_API_TOKEN),
+      sandboxBound: skills.currentRuntime.sandboxBound,
+      containerBound: skills.currentRuntime.containerBound
+    },
+    recommendation: platformRecommendation(primary),
+    skills
+  };
+}
+
+function platformRecommendation(primary) {
+  if (primary === "pages") return "Use Pages for the frontend and Workers for APIs/auth/background triggers.";
+  if (primary === "sandbox") return "Use Sandbox SDK when the product needs safe code execution, command runs, terminals, previews, or agent-generated code workflows.";
+  if (primary === "containers") return "Use Containers directly when the product needs a custom image, full Linux service, or heavier CPU/memory/disk than Workers.";
+  return "Use Workers first, then add Durable Objects, D1, R2, Queues, Vectorize, Workflows, Access, Sandbox, or Containers as requirements demand.";
+}
+
 async function runtimeSnapshot(env) {
   const accountId = env.OPEN_THINK_CF_ACCOUNT_ID || cloudflareAccountId || null;
   const currentScript = runtimeScriptName(env) || null;
@@ -804,7 +964,7 @@ async function runtimeSnapshot(env) {
       vectorizeBinding: env.VECTORIZE ? "VECTORIZE" : null
     },
     tools: {
-      builtIn: ["runtime_status", "memory_list", "files_list", "queue_task", "secret_put", "binding_add", "update_status", "mcp_call"],
+      builtIn: ["runtime_status", "memory_list", "files_list", "queue_task", "secret_put", "binding_add", "update_status", "cloudflare_platform_advice", "mcp_call"],
       mcp: {
         cloudflare: {
           serverUrl: "https://mcp.cloudflare.com/mcp",
@@ -814,6 +974,7 @@ async function runtimeSnapshot(env) {
         docs: "https://docs.mcp.cloudflare.com/mcp"
       }
     },
+    skills: cloudflarePlatformSkills(env),
     sourceUpdate: {
       platformUpdateApi: "/api/deployment/update on the open-think platform",
       artifactSync: "mcpu-style Artifacts Git flow: pull, commit, push, deploy, reconcile",
