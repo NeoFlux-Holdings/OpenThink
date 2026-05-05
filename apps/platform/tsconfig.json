@@ -16,6 +16,7 @@
       "@open-think/network": ["../../packages/network/src/index.ts"],
       "@open-think/retrieval": ["../../packages/retrieval/src/index.ts"],
       "@open-think/sandbox": ["../../packages/sandbox/src/index.ts"],
+      "@open-think/sync": ["../../packages/sync/src/index.ts"],
       "@open-think/state": ["../../packages/state/src/index.ts"],
       "@open-think/storage": ["../../packages/storage/src/index.ts"],
       "@open-think/tasks": ["../../packages/tasks/src/index.ts"],

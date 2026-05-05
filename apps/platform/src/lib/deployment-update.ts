@@ -1,7 +1,9 @@
 import type { AutoSyncConfig, SyncAction, SyncResult, SyncStatus } from "@open-think/sync";
+import { renderAgentWorkerModule } from "./agent-worker-template";
+import { CloudflareApiClient } from "./cloudflare-api";
 import type { DeploymentRecord, DeploymentRepository } from "./d1";
+import type { DeploymentRequest } from "./deployment-engine";
 import { readEnvString } from "./platform-env";
-import { runSyncAction, syncServiceFromEnv } from "./sync-service";
 
 export type DeploymentUpdateAction = Extract<SyncAction, "pull" | "deploy" | "reconcile"> | "status";
 
@@ -88,10 +90,6 @@ export function summarizeDeploymentUpdate(
     warnings.push("The original Cloudflare token is fingerprinted only; paste a token or configure OPEN_THINK_DEPLOYMENT_UPDATE_API_TOKEN.");
   }
 
-  if (!readEnvString(env, "ARTIFACTS_REMOTE") || !readEnvString(env, "ARTIFACTS_TOKEN")) {
-    warnings.push("Artifacts remote updates require ARTIFACTS_REMOTE and ARTIFACTS_TOKEN.");
-  }
-
   const summary: DeploymentUpdateSummary = {
     deploymentId: deployment.id,
     agentName: deployment.authorization?.agentName ?? deployment.id,
@@ -130,7 +128,7 @@ export async function runDeploymentUpdate(input: {
   const existingMetadata = readDeploymentUpdateMetadata(input.deployment.resourcePlan);
   const autoUpdate = normalizeAutoUpdate(input.autoUpdate, existingMetadata?.autoUpdate);
   const credential = resolveDeploymentUpdateCredential(env, input.cfApiToken);
-  const syncEnv = buildDeploymentSyncEnv(
+  const updateEnv = buildDeploymentSyncEnv(
     env,
     input.deployment,
     target,
@@ -138,26 +136,29 @@ export async function runDeploymentUpdate(input: {
     credential.source,
     autoUpdate
   );
-  const syncService = syncServiceFromEnv(syncEnv);
-
-  if (input.autoUpdate) {
-    await syncService.setAutoSync(autoUpdate);
-  }
-
-  const result =
-    input.action === "status"
-      ? undefined
-      : await runSyncAction(input.action, {
-          env: syncEnv,
-          message: `Update deployment ${input.deployment.id} from Artifacts`
-        });
-  const status = result?.status ?? (await syncService.status());
+  const github = await resolveGithubUpdateState(updateEnv, existingMetadata);
+  const statusBeforeAction = githubSyncStatus({
+    github,
+    autoUpdate,
+    metadata: existingMetadata
+  });
+  const result = await runGithubUpdateAction({
+    deployment: input.deployment,
+    target,
+    action: input.action,
+    credential,
+    env: updateEnv,
+    autoUpdate,
+    github,
+    status: statusBeforeAction
+  });
+  const status = result?.status ?? statusBeforeAction;
   const metadataInput: Parameters<typeof buildDeploymentUpdateMetadata>[0] = {
     target,
     autoUpdate,
     action: input.action,
     status,
-    env: syncEnv,
+    env: updateEnv,
     credentialSource: credential.source
   };
   if (result) metadataInput.result = result;
@@ -173,7 +174,7 @@ export async function runDeploymentUpdate(input: {
         ...input.deployment,
         resourcePlan
       },
-      syncEnv
+      updateEnv
     ),
     status,
     ...(result ? { result } : {}),
@@ -225,6 +226,216 @@ export async function runAutomaticDeploymentUpdatesFromEnv(
       }
     })
   );
+}
+
+interface GithubUpdateState {
+  repository: string;
+  branch: string;
+  remoteUrl: string;
+  remoteHead?: string;
+  checkedAt: string;
+  warning?: string;
+}
+
+async function resolveGithubUpdateState(
+  env: Record<string, unknown>,
+  metadata?: DeploymentUpdateMetadata
+): Promise<GithubUpdateState> {
+  const repository =
+    readEnvString(env, "OPEN_THINK_UPDATE_REPOSITORY") ?? "NeoFlux-Holdings/OpenThink";
+  const branch = readEnvString(env, "OPEN_THINK_UPDATE_BRANCH") ?? metadata?.branch ?? "main";
+  const remoteUrl = `https://github.com/${repository}`;
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "open-think-platform-update"
+  };
+  const githubToken = readEnvString(env, "OPEN_THINK_GITHUB_TOKEN");
+  if (githubToken) headers.Authorization = `Bearer ${githubToken}`;
+
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${repository}/commits/${encodeURIComponent(branch)}`,
+      { headers }
+    );
+    const body = (await response.json().catch(() => null)) as
+      | { sha?: string; message?: string }
+      | null;
+    if (!response.ok || !body?.sha) {
+      return {
+        repository,
+        branch,
+        remoteUrl,
+        checkedAt: new Date().toISOString(),
+        warning: body?.message ?? `GitHub returned ${response.status} for ${repository}@${branch}.`
+      };
+    }
+
+    return {
+      repository,
+      branch,
+      remoteUrl,
+      remoteHead: body.sha,
+      checkedAt: new Date().toISOString()
+    };
+  } catch (error) {
+    return {
+      repository,
+      branch,
+      remoteUrl,
+      checkedAt: new Date().toISOString(),
+      warning: error instanceof Error ? error.message : "GitHub remote check failed."
+    };
+  }
+}
+
+function githubSyncStatus(input: {
+  github: GithubUpdateState;
+  autoUpdate: AutoSyncConfig;
+  metadata?: DeploymentUpdateMetadata | undefined;
+  deployedHead?: string | undefined;
+  lastSyncAt?: string | undefined;
+  lastDeployAt?: string | undefined;
+}): SyncStatus {
+  const deployedHead =
+    input.deployedHead ?? input.metadata?.lastDeployedSha ?? input.metadata?.lastCommitSha;
+  const warnings = input.github.warning ? [input.github.warning] : [];
+  const status: SyncStatus = {
+    sourceOfTruth: "github-upstream",
+    branch: input.github.branch,
+    remoteUrl: input.github.remoteUrl,
+    dirtyFiles: [],
+    drift:
+      input.github.remoteHead && deployedHead
+        ? input.github.remoteHead === deployedHead
+          ? "clean"
+          : "remote-ahead"
+        : "unknown",
+    autoSync: input.autoUpdate,
+    missing: [],
+    warnings
+  };
+
+  if (input.github.remoteHead) status.remoteHead = input.github.remoteHead;
+  if (deployedHead) status.deployedHead = deployedHead;
+  const lastSyncAt = input.lastSyncAt ?? input.metadata?.lastSyncAt;
+  if (lastSyncAt) status.lastSyncAt = lastSyncAt;
+  const lastDeployAt = input.lastDeployAt ?? input.metadata?.lastDeployAt;
+  if (lastDeployAt) status.lastDeployAt = lastDeployAt;
+
+  return status;
+}
+
+async function runGithubUpdateAction(input: {
+  deployment: DeploymentRecord;
+  target: DeploymentUpdateTarget;
+  action: DeploymentUpdateAction;
+  credential: { source: DeploymentUpdateCredentialSource; apiToken?: string };
+  env: Record<string, unknown>;
+  autoUpdate: AutoSyncConfig;
+  github: GithubUpdateState;
+  status: SyncStatus;
+}): Promise<SyncResult | undefined> {
+  if (input.action === "status") return undefined;
+
+  if (input.action === "pull") {
+    const lastSyncAt = new Date().toISOString();
+    return {
+      action: "pull",
+      status: githubSyncStatus({
+        github: input.github,
+        autoUpdate: input.autoUpdate,
+        lastSyncAt
+      }),
+      message: input.github.remoteHead
+        ? `Checked GitHub upstream ${input.github.repository}@${input.github.branch} (${shortSha(input.github.remoteHead)}).`
+        : `Checked GitHub upstream ${input.github.repository}@${input.github.branch}; ${input.github.warning ?? "remote SHA was unavailable."}`,
+      ...(input.github.remoteHead ? { commitSha: input.github.remoteHead } : {})
+    };
+  }
+
+  if (input.action === "reconcile" && input.github.remoteHead && input.status.deployedHead === input.github.remoteHead) {
+    return {
+      action: "reconcile",
+      status: input.status,
+      message: `GitHub upstream ${input.github.repository}@${input.github.branch} already matches this deployment (${shortSha(input.github.remoteHead)}).`,
+      deployedSha: input.github.remoteHead
+    };
+  }
+
+  const deployedSha = await uploadGeneratedWorkerFromGithub(input);
+  const lastDeployAt = new Date().toISOString();
+  return {
+    action: input.action === "deploy" ? "deploy" : "reconcile",
+    status: githubSyncStatus({
+      github: input.github,
+      autoUpdate: input.autoUpdate,
+      deployedHead: deployedSha,
+      lastSyncAt: lastDeployAt,
+      lastDeployAt
+    }),
+    message: `Uploaded ${input.target.scriptName} from current OpenThink runtime with GitHub upstream ${input.github.repository}@${input.github.branch}${deployedSha ? ` (${shortSha(deployedSha)})` : ""}.`,
+    ...(input.github.remoteHead ? { commitSha: input.github.remoteHead } : {}),
+    ...(deployedSha ? { deployedSha } : {})
+  };
+}
+
+async function uploadGeneratedWorkerFromGithub(input: {
+  deployment: DeploymentRecord;
+  target: DeploymentUpdateTarget;
+  credential: { source: DeploymentUpdateCredentialSource; apiToken?: string };
+  env: Record<string, unknown>;
+  github: GithubUpdateState;
+}): Promise<string | undefined> {
+  if (!input.credential.apiToken) {
+    throw new DeploymentUpdateError(
+      "Updating a deployed Worker requires a Cloudflare API token. Paste a token or configure OPEN_THINK_DEPLOYMENT_UPDATE_API_TOKEN.",
+      401
+    );
+  }
+
+  const client = new CloudflareApiClient({
+    accountId: input.target.accountId,
+    apiToken: input.credential.apiToken
+  });
+  const sourceSha = input.github.remoteHead ?? readEnvString(input.env, "OPEN_THINK_SOURCE_SHA");
+  await client.uploadWorkerModule({
+    scriptName: input.target.scriptName,
+    moduleName: "worker.js",
+    moduleCode: renderAgentWorkerModule({
+      request: deploymentRequestFromRecord(input.deployment, input.target, input.env),
+      deploymentId: input.deployment.id,
+      scriptName: input.target.scriptName
+    }),
+    metadata: buildWorkerUploadMetadata(
+      input.deployment,
+      input.target,
+      input.env,
+      input.credential.source === "request-token" ? input.credential.apiToken : undefined,
+      sourceSha
+    )
+  });
+
+  return sourceSha;
+}
+
+function deploymentRequestFromRecord(
+  deployment: DeploymentRecord,
+  target: DeploymentUpdateTarget,
+  env: Record<string, unknown>
+): DeploymentRequest {
+  const runtime = readRuntimeConfig(deployment.resourcePlan, env);
+  const request: DeploymentRequest = {
+    flow: deployment.flow,
+    starterTemplate: deployment.starterTemplate,
+    userId: deployment.userId,
+    agentName: deployment.authorization?.agentName ?? deployment.id,
+    cloudflareAccountId: target.accountId,
+    spendLimitUsd: deployment.authorization?.spendLimitUsd ?? 100,
+    defaultModel: runtime.defaultModel,
+    modelProvider: runtime.modelProvider,
+    thinkingLevel: runtime.thinkingLevel
+  };
+  return request;
 }
 
 function readDeploymentUpdateTarget(
@@ -339,8 +550,10 @@ function buildDeploymentUpdateMetadata(input: {
     lastAction: input.action,
     updatedAt: new Date().toISOString()
   };
-  const remoteUrl = input.status?.remoteUrl ?? readEnvString(input.env, "ARTIFACTS_REMOTE");
-  const branch = input.status?.branch ?? readEnvString(input.env, "ARTIFACTS_BRANCH");
+  const updateRepository =
+    readEnvString(input.env, "OPEN_THINK_UPDATE_REPOSITORY") ?? "NeoFlux-Holdings/OpenThink";
+  const remoteUrl = input.status?.remoteUrl ?? `https://github.com/${updateRepository}`;
+  const branch = input.status?.branch ?? readEnvString(input.env, "OPEN_THINK_UPDATE_BRANCH");
 
   if (input.result?.message) metadata.lastMessage = input.result.message;
   if (input.error) metadata.lastError = input.error;
@@ -378,6 +591,7 @@ function buildDeploymentSyncEnv(
       buildWorkerUploadMetadata(
         deployment,
         target,
+        env,
         credentialSource === "request-token" ? apiToken : undefined
       )
     ),
@@ -390,7 +604,9 @@ function buildDeploymentSyncEnv(
 function buildWorkerUploadMetadata(
   deployment: DeploymentRecord,
   target: DeploymentUpdateTarget,
-  agentCloudflareApiToken?: string
+  env: Record<string, unknown>,
+  agentCloudflareApiToken?: string,
+  sourceSha?: string
 ): {
   main_module: string;
   compatibility_date: string;
@@ -404,6 +620,11 @@ function buildWorkerUploadMetadata(
   const r2Bucket = readRecord(resourcePlan.r2Bucket);
   const queue = readRecord(resourcePlan.queue);
   const vectorizeIndex = readRecord(resourcePlan.vectorizeIndex);
+  const runtime = readRuntimeConfig(resourcePlan, env);
+  const updateRepository =
+    readEnvString(env, "OPEN_THINK_UPDATE_REPOSITORY") ?? "NeoFlux-Holdings/OpenThink";
+  const updateBranch = readEnvString(env, "OPEN_THINK_UPDATE_BRANCH") ?? "main";
+  const updateBundlePath = readEnvString(env, "OPEN_THINK_UPDATE_BUNDLE_PATH") ?? "dist/worker.js";
   const compatibilityFlags = Array.isArray(wrangler?.compatibility_flags)
     ? wrangler.compatibility_flags.filter((flag): flag is string => typeof flag === "string")
     : ["nodejs_compat", "global_fetch_strictly_public"];
@@ -432,12 +653,42 @@ function buildWorkerUploadMetadata(
     {
       type: "plain_text",
       name: "OPEN_THINK_DEFAULT_MODEL",
-      text: "@cf/moonshotai/kimi-k2.6"
+      text: runtime.defaultModel
+    },
+    {
+      type: "plain_text",
+      name: "OPEN_THINK_MODEL_PROVIDER",
+      text: runtime.modelProvider
+    },
+    {
+      type: "plain_text",
+      name: "OPEN_THINK_THINKING_LEVEL",
+      text: runtime.thinkingLevel
+    },
+    {
+      type: "plain_text",
+      name: "OPEN_THINK_SCRIPT_NAME",
+      text: target.scriptName
     },
     {
       type: "plain_text",
       name: "OPEN_THINK_CF_ACCOUNT_ID",
       text: target.accountId
+    },
+    {
+      type: "plain_text",
+      name: "OPEN_THINK_UPDATE_REPOSITORY",
+      text: updateRepository
+    },
+    {
+      type: "plain_text",
+      name: "OPEN_THINK_UPDATE_BRANCH",
+      text: updateBranch
+    },
+    {
+      type: "plain_text",
+      name: "OPEN_THINK_UPDATE_BUNDLE_PATH",
+      text: updateBundlePath
     }
   ];
   const databaseId = readString(d1Database?.id);
@@ -462,6 +713,13 @@ function buildWorkerUploadMetadata(
       type: "secret_text",
       name: "OPEN_THINK_CF_API_TOKEN",
       text: agentCloudflareApiToken
+    });
+  }
+  if (sourceSha) {
+    bindings.push({
+      type: "plain_text",
+      name: "OPEN_THINK_SOURCE_SHA",
+      text: sourceSha
     });
   }
 
@@ -518,6 +776,67 @@ function normalizeAutoUpdate(
     intervalSeconds:
       Number.isFinite(interval) && interval >= 60 ? interval : fallback.intervalSeconds
   };
+}
+
+function readRuntimeConfig(
+  resourcePlan: Record<string, unknown>,
+  env: Record<string, unknown>
+): {
+  defaultModel: string;
+  modelProvider: "workers-ai" | "openrouter" | "anthropic" | "openai";
+  thinkingLevel: "low" | "medium" | "high" | "xhigh";
+} {
+  const runtime = readRecord(resourcePlan.openThinkRuntime);
+  const defaultModel =
+    readEnvString(env, "OPEN_THINK_DEFAULT_MODEL") ??
+    readString(runtime?.defaultModel) ??
+    "@cf/moonshotai/kimi-k2.6";
+  const provider =
+    readEnvString(env, "OPEN_THINK_MODEL_PROVIDER") ??
+    readString(runtime?.modelProvider) ??
+    inferModelProvider(defaultModel);
+  const thinkingLevel =
+    readEnvString(env, "OPEN_THINK_THINKING_LEVEL") ??
+    readString(runtime?.thinkingLevel) ??
+    "medium";
+
+  return {
+    defaultModel,
+    modelProvider: normalizeModelProvider(provider),
+    thinkingLevel: normalizeThinkingLevel(thinkingLevel)
+  };
+}
+
+function normalizeModelProvider(
+  value: string
+): "workers-ai" | "openrouter" | "anthropic" | "openai" {
+  if (
+    value === "workers-ai" ||
+    value === "openrouter" ||
+    value === "anthropic" ||
+    value === "openai"
+  ) {
+    return value;
+  }
+  return "workers-ai";
+}
+
+function inferModelProvider(model: string): "workers-ai" | "openrouter" | "anthropic" | "openai" {
+  if (model.startsWith("openrouter/")) return "openrouter";
+  if (model.startsWith("anthropic/")) return "anthropic";
+  if (model.startsWith("openai/")) return "openai";
+  return "workers-ai";
+}
+
+function normalizeThinkingLevel(value: string): "low" | "medium" | "high" | "xhigh" {
+  if (value === "low" || value === "medium" || value === "high" || value === "xhigh") {
+    return value;
+  }
+  return "medium";
+}
+
+function shortSha(value: string): string {
+  return value.slice(0, 8);
 }
 
 function readRecord(value: unknown): Record<string, unknown> | undefined {

@@ -179,6 +179,11 @@ function resourcePlanFromSettings(input: {
     accountId: input.accountId,
     scriptName: input.scriptName,
     recoveredFromCloudflare: true,
+    openThinkRuntime: {
+      defaultModel: readBindingText(input.bindings, "OPEN_THINK_DEFAULT_MODEL") ?? "@cf/moonshotai/kimi-k2.6",
+      modelProvider: readBindingText(input.bindings, "OPEN_THINK_MODEL_PROVIDER") ?? "workers-ai",
+      thinkingLevel: readBindingText(input.bindings, "OPEN_THINK_THINKING_LEVEL") ?? "medium"
+    },
     workerDeployment: {
       scriptName: input.scriptName,
       uploadedAt: input.updatedAt,
@@ -209,6 +214,9 @@ function resourcePlanFromSettings(input: {
         intervalSeconds: 300
       },
       lastAction: "status",
+      ...(readBindingText(input.bindings, "OPEN_THINK_SOURCE_SHA")
+        ? { lastDeployedSha: readBindingText(input.bindings, "OPEN_THINK_SOURCE_SHA") }
+        : {}),
       updatedAt: new Date().toISOString()
     }
   };

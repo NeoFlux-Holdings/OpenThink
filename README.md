@@ -39,9 +39,11 @@ Local `next dev` can launch agents with in-memory platform state. For persistent
 
 ## Sync Model
 
-After bootstrap, `open-think` can use a Cloudflare Artifacts Git remote as the canonical repository. The platform exposes `/sync` for manual pull, commit, push, deploy, and reconcile actions, and the Worker cron can run the same reconciler automatically.
+Deployed personal agents use GitHub as the upstream update channel by default. The platform checks `OPEN_THINK_UPDATE_REPOSITORY` and `OPEN_THINK_UPDATE_BRANCH`, regenerates the Worker from the current platform runtime, and uploads it through the Cloudflare Workers Scripts API with secret preservation enabled.
 
-Sync deploys fail closed unless `ARTIFACTS_REMOTE`, `ARTIFACTS_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and `OPEN_THINK_SCRIPT_NAME` are configured.
+Cloudflare Artifacts Git is optional. It is only needed for the advanced draft-workspace loop where Worker-side edits commit to an Artifacts Git remote and local changes pull from the same remote.
+
+Artifacts sync deploys fail closed unless `ARTIFACTS_REMOTE`, `ARTIFACTS_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and `OPEN_THINK_SCRIPT_NAME` are configured.
 
 Deployed personal agents use `OPEN_THINK_UPDATE_REPOSITORY=NeoFlux-Holdings/OpenThink` by default for upstream remote-update checks.
 

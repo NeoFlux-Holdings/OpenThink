@@ -443,7 +443,7 @@ export function SyncWorkspace() {
           <div className="surface-header">
             <div className="page-kicker">Deployed Agent</div>
             <h2>Update target</h2>
-            <p>Manual and cron updates reuse the stored resource plan for the selected launch.</p>
+            <p>Manual and cron updates use GitHub as upstream, then upload the generated Worker through Cloudflare.</p>
           </div>
           <div className="surface-body">
             {deploymentError ? <p className="notice">{deploymentError}</p> : null}
@@ -540,7 +540,7 @@ export function SyncWorkspace() {
               onClick={() => void runDeploymentUpdate("pull")}
             >
               <GitPullRequestArrow size={16} aria-hidden="true" />
-              {isDeploymentWorking === "pull" ? "Working" : "Pull Remote"}
+              {isDeploymentWorking === "pull" ? "Working" : "Check GitHub"}
             </button>
             <button
               className="button button-primary"

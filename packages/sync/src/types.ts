@@ -1,4 +1,4 @@
-export type SyncSourceOfTruth = "cloudflare-artifacts" | "local-dev";
+export type SyncSourceOfTruth = "cloudflare-artifacts" | "github-upstream" | "local-dev";
 export type SyncDirection = "pull-from-remote" | "push-to-remote" | "bidirectional";
 export type SyncDrift = "clean" | "remote-ahead" | "local-ahead" | "diverged" | "unknown";
 export type SyncAction = "pull" | "commit" | "push" | "deploy" | "reconcile";
