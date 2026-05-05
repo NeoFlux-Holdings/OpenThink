@@ -350,7 +350,7 @@ async function handleChat(request, env) {
         "D1 memory is available through the built-in memory_list tool and the /memory endpoint. If asked what memory says, answer from recent D1 memory rows or call memory_list. Do not ask the owner for the D1 database id for this agent's own memory.",
         "R2 files are available through files_list and /files. Tasks are available through queue_task and /tasks. Runtime and update status are available through runtime_status and /runtime/context.",
         "Vectorize is provisioned as semantic memory when the VECTORIZE binding is present; explain that vector query wiring is a next runtime tool if no direct vector query tool is available.",
-        "For source updates, explain the two supported paths: managed remote updates from the configured GitHub NeoFlux-Holdings/OpenThink repository through the platform Artifacts/mcpu-style reconciler, or this runtime's /updates/apply endpoint that uploads a built worker.js bundle through the Workers Scripts API while preserving secrets. Managed remote updates are preferred when the owner wants to pull from upstream; direct bundle updates are for a verified generated artifact.",
+        "For source updates, explain three lanes: default managed updates from the configured GitHub NeoFlux-Holdings/OpenThink repository through the platform reconciler; optional self-editing through a per-agent Cloudflare Artifacts workspace plus Sandbox/Containers when enabled; and this runtime's /updates/apply endpoint for a verified built worker.js bundle. Managed GitHub updates are preferred for upstream releases. The Artifacts/Sandbox lane is for agent-authored changes, tests, diffs, and PR preparation, and can be added later when the account has paid capabilities.",
         "If local agent changes and remote updates both exist, use this order: snapshot current runtime status, identify local changes or bindings/secrets, fetch remote status, propose rebase or reconcile, ask before destructive replacement, then deploy with secret preservation. Treat this as the update-management playbook.",
         "Secrets are managed through /secrets and the secret_put tool. Non-secret bindings are managed through /updates/bindings and the binding_add tool, which patches Worker script settings. For new resource-backed bindings, create or identify the Cloudflare resource first, then bind its id/name.",
         "When the owner asks for Cloudflare operations, use the mcp_call tool. For destructive or expensive actions, explain the exact operation and ask for confirmation before using execute.",
@@ -1052,9 +1052,47 @@ function builderNextSteps(primary) {
 function permissionNotesFor(primary) {
   const common = ["Workers Scripts Edit", "Account Settings Read", "Access Apps and Policies Edit when public/private routes need protection"];
   if (primary === "pages") return [...common, "Cloudflare Pages Edit", "DNS Edit and Workers Routes Edit for custom domains"];
-  if (primary === "sandbox") return [...common, "Containers Edit or Cloudchamber Edit", "Workers R2 Storage Edit for artifacts", "D1 Edit for session metadata"];
-  if (primary === "containers") return [...common, "Containers Edit or Cloudchamber Edit", "Workers R2 Storage Edit for artifacts or mounted buckets"];
+  if (primary === "sandbox") return [...common, "Artifacts Edit", "Containers Edit or Cloudchamber Edit", "Workers R2 Storage Edit for artifacts", "D1 Edit for session metadata"];
+  if (primary === "containers") return [...common, "Artifacts Edit when source/workspace sync is needed", "Containers Edit or Cloudchamber Edit", "Workers R2 Storage Edit for artifacts or mounted buckets"];
   return [...common, "D1/R2/KV/Queues/Vectorize/AI Gateway depending on chosen bindings"];
+}
+
+function workspaceStatus(env) {
+  const artifactsRemote = env.OPEN_THINK_ARTIFACTS_REMOTE || null;
+  const artifactsRepo = env.OPEN_THINK_ARTIFACTS_REPO || null;
+  const artifactsNamespace = env.OPEN_THINK_ARTIFACTS_NAMESPACE || null;
+  const sandboxStatus = env.OPEN_THINK_SANDBOX_STATUS || (env.Sandbox || env.SANDBOX ? "bound" : "not-configured");
+  const containerStatus = env.OPEN_THINK_CONTAINER_STATUS || (env.AgentContainer || env.CONTAINER ? "bound" : "not-configured");
+  return {
+    mode: env.OPEN_THINK_WORKSPACE_MODE || (artifactsRemote ? "artifacts-sandbox-workspace" : "basic-github-updates"),
+    basicGithubUpdates: {
+      available: true,
+      repository: env.OPEN_THINK_UPDATE_REPOSITORY || "NeoFlux-Holdings/OpenThink",
+      branch: env.OPEN_THINK_UPDATE_BRANCH || "main",
+      note: "Works on Free or Paid accounts when a Cloudflare API token can update this Worker."
+    },
+    artifacts: {
+      configured: Boolean(artifactsRemote && artifactsRepo && artifactsNamespace),
+      namespace: artifactsNamespace,
+      repo: artifactsRepo,
+      remote: artifactsRemote,
+      tokenSecretAvailable: Boolean(env.OPEN_THINK_ARTIFACTS_TOKEN),
+      requiresPaidPlan: true,
+      note: artifactsRemote
+        ? "Use this Git workspace for agent-authored code changes, diffs, and PR preparation."
+        : "Optional upgrade. Add later from the platform when the account has Artifacts access."
+    },
+    sandbox: {
+      status: sandboxStatus,
+      requiresPaidPlan: true,
+      note: "Use Sandbox for untrusted command/code execution, tests, terminal sessions, and generated app previews."
+    },
+    containers: {
+      status: containerStatus,
+      requiresPaidPlan: true,
+      note: "Use Containers for custom Docker images, long-running services, heavier workloads, or runtimes Sandbox does not cover."
+    }
+  };
 }
 
 async function runtimeSnapshot(env) {
@@ -1099,9 +1137,11 @@ async function runtimeSnapshot(env) {
       }
     },
     skills: cloudflarePlatformSkills(env),
+    workspace: workspaceStatus(env),
     sourceUpdate: {
       platformUpdateApi: "/api/deployment/update on the open-think platform",
-      artifactSync: "mcpu-style Artifacts Git flow: pull, commit, push, deploy, reconcile",
+      githubUpstream: "Default update lane: check NeoFlux-Holdings/OpenThink, regenerate this Worker, upload with keep_bindings.",
+      artifactSync: "Optional self-edit lane: Cloudflare Artifacts Git workspace plus Sandbox/Containers when enabled.",
       remoteRepository: env.OPEN_THINK_UPDATE_REPOSITORY || "NeoFlux-Holdings/OpenThink",
       remoteBranch: env.OPEN_THINK_UPDATE_BRANCH || "main",
       remoteBundlePath: env.OPEN_THINK_UPDATE_BUNDLE_PATH || "dist/worker.js",
@@ -1119,6 +1159,8 @@ async function runtimeSnapshot(env) {
         : null,
       playbook: [
         "Prefer managed remote updates for upstream open-think changes.",
+        "Use the Artifacts workspace for agent-authored code changes when OPEN_THINK_ARTIFACTS_REMOTE is configured.",
+        "If Artifacts/Sandbox are not configured, explain that the account can keep basic GitHub updates now and add the self-evolving workspace later.",
         "Use direct bundle updates only for a verified worker.js artifact.",
         "For local agent changes, save memory/files/secrets first, compare remote status, then rebase/reconcile before replacing code.",
         "Secrets are preserved by keep_bindings and are never readable after storage."
@@ -1220,6 +1262,7 @@ async function updateStatusPayload(env) {
     scriptName: currentScript || null,
     apiTokenAvailable: Boolean(env.OPEN_THINK_CF_API_TOKEN),
     configuredBundleUrl: Boolean(env.OPEN_THINK_UPDATE_BUNDLE_URL),
+    workspace: workspaceStatus(env),
     remote: remoteUpdateConfig(env),
     platformUpdate: {
       mode: "platform-orchestrated",
@@ -2712,6 +2755,14 @@ function renderAgentAppHtml(): string {
                 <button class="button button-primary" type="submit">Apply bundle</button>
               </form>
             </section>
+
+            <section class="path-card">
+              <div>
+                <strong>Self-edit workspace</strong>
+                <span>Optional Artifacts Git plus Sandbox/Containers for agent-authored changes, tests, previews, and PR preparation.</span>
+              </div>
+              <div id="workspace-status" class="notice">Checking workspace...</div>
+            </section>
           </div>
 
           <section class="panel">
@@ -3067,8 +3118,20 @@ function renderAgentAppHtml(): string {
           metric("Script", data.scriptName || "unknown"),
           metric("Remote", data.remote?.repository || "NeoFlux-Holdings/OpenThink"),
           metric("Branch", data.remote?.branch || "main"),
-          metric("Bundle", data.configuredBundleUrl ? "configured secret" : (data.remote?.bundlePath || "dist/worker.js"))
+          metric("Bundle", data.configuredBundleUrl ? "configured secret" : (data.remote?.bundlePath || "dist/worker.js")),
+          metric("Workspace", data.workspace?.mode || "basic-github-updates")
         ].join("");
+        const workspace = data.workspace || {};
+        const workspaceBox = $("workspace-status");
+        if (workspaceBox) {
+          const artifactsReady = Boolean(workspace.artifacts?.configured);
+          workspaceBox.className = artifactsReady ? "notice" : "notice";
+          workspaceBox.innerHTML = artifactsReady
+            ? "<strong>Artifacts workspace attached</strong><br>" +
+              escapeText((workspace.artifacts?.namespace || "default") + "/" + (workspace.artifacts?.repo || "repo")) +
+              "<br>Sandbox " + escapeText(workspace.sandbox?.status || "not-configured")
+            : "<strong>Basic updates active</strong><br>Artifacts/Sandbox can be added later from the platform when this account has paid workspace capabilities.";
+        }
         bindingList.innerHTML = (data.bindings || [])
           .map(renderBindingItem)
           .join("") || "<li>No bindings returned by Worker settings.</li>";

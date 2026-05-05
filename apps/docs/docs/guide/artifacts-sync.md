@@ -1,14 +1,16 @@
 # Artifacts Sync
 
-After the first bootstrap, `open-think` can treat a Cloudflare Artifacts Git remote as the canonical repository.
+Deployed agents always have a basic GitHub upstream update lane. The platform can check `NeoFlux-Holdings/OpenThink`, regenerate the Worker, and upload it with secret preservation.
+
+Cloudflare Artifacts is the optional self-edit workspace lane. It can be enabled later for paid accounts that want the agent to maintain its own Git workspace, run Sandbox-backed tests/previews, and prepare pull requests back to the upstream repo.
 
 The sync loop is:
 
-1. Worker or agent edits files in a draft repository.
-2. `repo.commit` commits the draft to the Artifacts Git remote.
-3. `repo.push` pushes the commit.
-4. `repo.deploy` uploads `worker.js` to the configured Cloudflare Worker script.
-5. Local developers pull the same Artifacts remote when they want a local checkout.
+1. The platform creates or reuses a per-agent Artifacts repo and stores the repo-scoped write token as a Worker secret.
+2. The agent edits files in the Artifacts draft workspace.
+3. Sandbox or Containers run tests, builds, commands, and previews when enabled.
+4. The reconciler commits/pushes workspace changes, generates the Worker bundle, and uploads it with `keep_bindings`.
+5. Reusable improvements can be proposed as branches or pull requests against `NeoFlux-Holdings/OpenThink`.
 
 ## Environment
 

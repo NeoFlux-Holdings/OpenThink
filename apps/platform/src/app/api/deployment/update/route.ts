@@ -20,7 +20,8 @@ const updateActions = new Set<DeploymentUpdateAction>([
   "status",
   "pull",
   "deploy",
-  "reconcile"
+  "reconcile",
+  "enable-workspace"
 ]);
 
 export async function GET(request: Request): Promise<Response> {

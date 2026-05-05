@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DeploymentRecord } from "../d1";
 import {
   runDeploymentUpdate,
@@ -6,6 +6,10 @@ import {
 } from "../deployment-update";
 
 describe("deployment updates", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("summarizes whether an update can run without pasting a token", () => {
     const summary = summarizeDeploymentUpdate(deploymentRecord(), {
       ARTIFACTS_REMOTE: "https://artifacts.example/open-think.git",
@@ -49,7 +53,78 @@ describe("deployment updates", () => {
     });
   });
 
+  it("can attach the optional Artifacts workspace after launch", async () => {
+    let uploadedMetadata: Record<string, unknown> | undefined;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const target = String(url);
+        if (target.includes("api.github.com/repos/NeoFlux-Holdings/OpenThink/commits/main")) {
+          return new Response(JSON.stringify({ sha: "abc123456789" }), {
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (target.endsWith("/accounts/acct/artifacts/namespaces/default/repos")) {
+          return json({
+            result: {
+              id: "repo-id",
+              name: "open-think-agent",
+              description: "Self-edit workspace",
+              default_branch: "main",
+              remote: "https://acct.artifacts.cloudflare.net/git/default/open-think-agent.git",
+              token: "art-token"
+            }
+          });
+        }
+        if (target.includes("/accounts/acct/workers/scripts/open-think-agent")) {
+          uploadedMetadata = JSON.parse(String((init?.body as FormData).get("metadata")));
+          return json({ result: {} });
+        }
+        return json({ result: {} });
+      }) as unknown as typeof fetch
+    );
+
+    const result = await runDeploymentUpdate({
+      deployment: deploymentRecord(),
+      action: "enable-workspace",
+      env: {},
+      cfApiToken: "cf-token"
+    });
+
+    expect(result.summary.workspace.artifacts.status).toBe("configured");
+    expect(result.resourcePlan.openThinkWorkspace).toMatchObject({
+      mode: "artifacts-sandbox-workspace",
+      artifact: {
+        namespace: "default",
+        repo: "open-think-agent",
+        tokenSecretConfigured: true
+      },
+      sandbox: {
+        status: "ready-to-add"
+      }
+    });
+    expect(uploadedMetadata?.bindings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "secret_text",
+          name: "OPEN_THINK_ARTIFACTS_TOKEN",
+          text: "art-token"
+        })
+      ])
+    );
+  });
+
 });
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify({ success: status < 400, ...(body as object) }), {
+    status,
+    headers: {
+      "Content-Type": "application/json"
+    }
+  });
+}
 
 function deploymentRecord(): DeploymentRecord {
   return {

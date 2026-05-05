@@ -534,6 +534,73 @@ export function SyncWorkspace() {
                 </div>
               ))}
             </div>
+            {selectedDeployment ? (
+              <div className="capability-lanes" aria-label="Agent update capability lanes">
+                <div className="capability-card" data-state="ready">
+                  <div>
+                    <span className="capability-kicker">Works now</span>
+                    <h3>GitHub upstream updates</h3>
+                    <p>{selectedDeployment.workspace.basicUpdates.description}</p>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Repo</dt>
+                      <dd>{selectedDeployment.workspace.basicUpdates.repository}</dd>
+                    </div>
+                    <div>
+                      <dt>Branch</dt>
+                      <dd>{selectedDeployment.workspace.basicUpdates.branch}</dd>
+                    </div>
+                  </dl>
+                </div>
+                <div
+                  className="capability-card"
+                  data-state={
+                    selectedDeployment.workspace.artifacts.status === "configured"
+                      ? "ready"
+                      : "upgrade"
+                  }
+                >
+                  <div>
+                    <span className="capability-kicker">
+                      {selectedDeployment.workspace.artifacts.status === "configured"
+                        ? "Self-edit workspace"
+                        : "Add later"}
+                    </span>
+                    <h3>Artifacts + Sandbox lane</h3>
+                    <p>{selectedDeployment.workspace.artifacts.description}</p>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Artifacts</dt>
+                      <dd>
+                        {selectedDeployment.workspace.artifacts.remote
+                          ? `${selectedDeployment.workspace.artifacts.namespace}/${selectedDeployment.workspace.artifacts.repo}`
+                          : "not attached"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Sandbox</dt>
+                      <dd>{selectedDeployment.workspace.sandbox.status.replace(/-/g, " ")}</dd>
+                    </div>
+                    <div>
+                      <dt>Token</dt>
+                      <dd>
+                        {selectedDeployment.workspace.artifacts.tokenSecretConfigured
+                          ? "stored as Worker secret"
+                          : "created on enable"}
+                      </dd>
+                    </div>
+                  </dl>
+                  {selectedDeployment.workspace.artifacts.status !== "configured" ? (
+                    <p className="capability-note">
+                      This can stay off for accounts without paid workspace capabilities. Enable it
+                      later after the account has Artifacts/Sandbox access.
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
             {selectedDeployment?.warnings.length ? (
               <p className="automation-note">{selectedDeployment.warnings[0]}</p>
             ) : null}
@@ -593,6 +660,19 @@ export function SyncWorkspace() {
             >
               <ListRestart size={16} aria-hidden="true" />
               {isDeploymentWorking === "reconcile" ? "Working" : "Reconcile"}
+            </button>
+            <button
+              className="button"
+              type="button"
+              disabled={!selectedDeployment || isDeploymentWorking !== null}
+              onClick={() => void runDeploymentUpdate("enable-workspace")}
+            >
+              <Settings2 size={16} aria-hidden="true" />
+              {isDeploymentWorking === "enable-workspace"
+                ? "Working"
+                : selectedDeployment?.workspace.artifacts.status === "configured"
+                  ? "Refresh Workspace"
+                  : "Enable Workspace"}
             </button>
             <button
               className="button"

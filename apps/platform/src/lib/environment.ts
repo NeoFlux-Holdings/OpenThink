@@ -50,9 +50,15 @@ export const cloudflareTokenPermissions: TokenPermission[] = [
   },
   {
     scope: "Account",
+    permission: "Artifacts Edit / Write",
+    reason: "Create optional per-agent Git workspaces and mint repo-scoped Artifacts tokens.",
+    required: false
+  },
+  {
+    scope: "Account",
     permission: "Containers Edit / Write",
     reason: "Create and update Container-backed agent runtimes.",
-    required: true
+    required: false
   },
   {
     scope: "Account",

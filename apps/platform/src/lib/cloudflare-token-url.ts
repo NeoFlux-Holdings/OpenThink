@@ -14,6 +14,14 @@ export const openThinkTokenPermissions: CloudflareTokenPermissionPreset[] = [
     reason: "Upload and update the personal agent Worker."
   },
   {
+    key: "artifacts",
+    type: "edit",
+    label: "Artifacts Edit",
+    reason: "Create the optional per-agent Git workspace used for self-evolving code changes.",
+    manualVerification:
+      "If Cloudflare does not preselect this, manually add Account > Artifacts > Edit."
+  },
+  {
     key: "cloudchamber",
     type: "edit",
     label: "Containers Edit",

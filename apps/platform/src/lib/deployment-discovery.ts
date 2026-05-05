@@ -221,6 +221,38 @@ function resourcePlanFromSettings(input: {
     }
   };
 
+  const artifactRemote = readBindingText(input.bindings, "OPEN_THINK_ARTIFACTS_REMOTE");
+  const artifactNamespace = readBindingText(input.bindings, "OPEN_THINK_ARTIFACTS_NAMESPACE");
+  const artifactRepo = readBindingText(input.bindings, "OPEN_THINK_ARTIFACTS_REPO");
+  if (artifactRemote && artifactNamespace && artifactRepo) {
+    resourcePlan.openThinkWorkspace = {
+      mode: "artifacts-sandbox-workspace",
+      artifact: {
+        namespace: artifactNamespace,
+        repo: artifactRepo,
+        remote: artifactRemote,
+        defaultBranch: readBindingText(input.bindings, "ARTIFACTS_BRANCH") ?? "main",
+        tokenSecretConfigured: Boolean(readBinding(input.bindings, "OPEN_THINK_ARTIFACTS_TOKEN")),
+        enabledAt: input.updatedAt
+      },
+      sandbox: {
+        status:
+          readBindingText(input.bindings, "OPEN_THINK_SANDBOX_STATUS") === "ready-to-add"
+            ? "ready-to-add"
+            : "not-configured",
+        requiresPaidPlan: true
+      },
+      containers: {
+        status:
+          readBindingText(input.bindings, "OPEN_THINK_CONTAINER_STATUS") === "ready-to-add"
+            ? "ready-to-add"
+            : "not-configured",
+        requiresPaidPlan: true
+      },
+      updatedAt: input.updatedAt
+    };
+  }
+
   const d1Id = readString(d1?.id);
   if (d1Id) resourcePlan.d1Database = { id: d1Id, name: readString(d1?.database_name) ?? "DB" };
 

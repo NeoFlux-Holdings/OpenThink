@@ -5,7 +5,10 @@ import type { DeploymentRecord, DeploymentRepository } from "./d1";
 import type { DeploymentRequest } from "./deployment-engine";
 import { readEnvString } from "./platform-env";
 
-export type DeploymentUpdateAction = Extract<SyncAction, "pull" | "deploy" | "reconcile"> | "status";
+export type DeploymentUpdateAction =
+  | Extract<SyncAction, "pull" | "deploy" | "reconcile">
+  | "status"
+  | "enable-workspace";
 
 export type DeploymentUpdateCredentialSource =
   | "request-token"
@@ -37,6 +40,63 @@ export interface DeploymentUpdateMetadata {
   updatedAt: string;
 }
 
+export interface DeploymentWorkspaceArtifact {
+  namespace: string;
+  repo: string;
+  remote: string;
+  defaultBranch: string;
+  tokenExpiresAt?: string | undefined;
+  tokenSecretConfigured: boolean;
+  enabledAt: string;
+}
+
+export interface DeploymentWorkspaceMetadata {
+  mode: "basic-github-updates" | "artifacts-sandbox-workspace";
+  artifact?: DeploymentWorkspaceArtifact | undefined;
+  sandbox: {
+    status: "not-configured" | "ready-to-add";
+    requiresPaidPlan: true;
+  };
+  containers: {
+    status: "not-configured" | "ready-to-add";
+    requiresPaidPlan: true;
+  };
+  updatedAt: string;
+}
+
+export interface DeploymentWorkspaceCapabilityPlan {
+  mode: DeploymentWorkspaceMetadata["mode"];
+  basicUpdates: {
+    status: "ready";
+    source: "github-upstream";
+    repository: string;
+    branch: string;
+    description: string;
+  };
+  artifacts: {
+    status: "configured" | "upgradeable";
+    namespace?: string | undefined;
+    repo?: string | undefined;
+    remote?: string | undefined;
+    branch?: string | undefined;
+    tokenExpiresAt?: string | undefined;
+    tokenSecretConfigured: boolean;
+    requiresPaidPlan: true;
+    description: string;
+  };
+  sandbox: {
+    status: "not-configured" | "ready-to-add";
+    requiresPaidPlan: true;
+    description: string;
+  };
+  containers: {
+    status: "not-configured" | "ready-to-add";
+    requiresPaidPlan: true;
+    description: string;
+  };
+  recommendedNextAction: string;
+}
+
 export interface DeploymentUpdateSummary {
   deploymentId: string;
   agentName: string;
@@ -47,6 +107,7 @@ export interface DeploymentUpdateSummary {
   canUpdateWithoutToken: boolean;
   credentialSource: DeploymentUpdateCredentialSource;
   tokenFingerprint?: string;
+  workspace: DeploymentWorkspaceCapabilityPlan;
   warnings: string[];
 }
 
@@ -80,6 +141,7 @@ export function summarizeDeploymentUpdate(
   const target = readDeploymentUpdateTarget(deployment);
   const metadata = readDeploymentUpdateMetadata(deployment.resourcePlan);
   const credential = resolveDeploymentUpdateCredential(env);
+  const workspace = buildWorkspaceCapabilityPlan(deployment.resourcePlan, env, metadata);
   const warnings: string[] = [];
 
   if (!target) {
@@ -97,6 +159,7 @@ export function summarizeDeploymentUpdate(
     status: deployment.status,
     canUpdateWithoutToken: Boolean(credential.apiToken),
     credentialSource: credential.source,
+    workspace,
     warnings
   };
 
@@ -142,6 +205,44 @@ export async function runDeploymentUpdate(input: {
     autoUpdate,
     metadata: existingMetadata
   });
+
+  if (input.action === "enable-workspace") {
+    const workspaceResult = await enableSelfEditingWorkspace({
+      deployment: input.deployment,
+      target,
+      credential,
+      env: updateEnv,
+      github,
+      autoUpdate
+    });
+    const metadata = buildDeploymentUpdateMetadata({
+      target,
+      autoUpdate,
+      action: input.action,
+      status: workspaceResult.result.status,
+      env: updateEnv,
+      credentialSource: credential.source,
+      result: workspaceResult.result
+    });
+    const resourcePlan = withDeploymentWorkspaceMetadata(
+      withDeploymentUpdateMetadata(input.deployment.resourcePlan, metadata),
+      workspaceResult.workspace
+    );
+
+    return {
+      summary: summarizeDeploymentUpdate(
+        {
+          ...input.deployment,
+          resourcePlan
+        },
+        updateEnv
+      ),
+      status: workspaceResult.result.status,
+      result: workspaceResult.result,
+      resourcePlan
+    };
+  }
+
   const result = await runGithubUpdateAction({
     deployment: input.deployment,
     target,
@@ -379,6 +480,101 @@ async function runGithubUpdateAction(input: {
   };
 }
 
+async function enableSelfEditingWorkspace(input: {
+  deployment: DeploymentRecord;
+  target: DeploymentUpdateTarget;
+  credential: { source: DeploymentUpdateCredentialSource; apiToken?: string };
+  env: Record<string, unknown>;
+  github: GithubUpdateState;
+  autoUpdate: AutoSyncConfig;
+}): Promise<{ result: SyncResult; workspace: DeploymentWorkspaceMetadata }> {
+  if (!input.credential.apiToken) {
+    throw new DeploymentUpdateError(
+      "Enabling the self-edit workspace requires a Cloudflare API token with Artifacts Edit and Workers Scripts Write.",
+      401
+    );
+  }
+
+  const namespace =
+    readEnvString(input.env, "OPEN_THINK_ARTIFACTS_NAMESPACE") ??
+    readEnvString(input.env, "ARTIFACTS_NAMESPACE") ??
+    "default";
+  const repoName = artifactRepoName(input.target.scriptName);
+  const client = new CloudflareApiClient({
+    accountId: input.target.accountId,
+    apiToken: input.credential.apiToken
+  });
+  const artifact = await client.ensureArtifactRepoWithWriteToken({
+    namespace,
+    repoName,
+    description: `Self-edit workspace for ${input.deployment.authorization?.agentName ?? input.deployment.id}`,
+    defaultBranch: input.github.branch,
+    tokenTtlSeconds: readPositiveInteger(input.env, "OPEN_THINK_ARTIFACTS_TOKEN_TTL_SECONDS") ?? 86400
+  });
+  const workspace: DeploymentWorkspaceMetadata = {
+    mode: "artifacts-sandbox-workspace",
+    artifact: {
+      namespace,
+      repo: artifact.name,
+      remote: artifact.remote,
+      defaultBranch: artifact.defaultBranch,
+      ...(artifact.expiresAt ? { tokenExpiresAt: artifact.expiresAt } : {}),
+      tokenSecretConfigured: true,
+      enabledAt: new Date().toISOString()
+    },
+    sandbox: {
+      status: "ready-to-add",
+      requiresPaidPlan: true
+    },
+    containers: {
+      status: "ready-to-add",
+      requiresPaidPlan: true
+    },
+    updatedAt: new Date().toISOString()
+  };
+  const deployedSha =
+    input.github.remoteHead ?? readEnvString(input.env, "OPEN_THINK_SOURCE_SHA");
+
+  await client.uploadWorkerModule({
+    scriptName: input.target.scriptName,
+    moduleName: "worker.js",
+    moduleCode: renderAgentWorkerModule({
+      request: deploymentRequestFromRecord(input.deployment, input.target, input.env),
+      deploymentId: input.deployment.id,
+      scriptName: input.target.scriptName
+    }),
+    metadata: buildWorkerUploadMetadata(
+      input.deployment,
+      input.target,
+      input.env,
+      input.credential.source === "request-token" ? input.credential.apiToken : undefined,
+      deployedSha,
+      workspace,
+      artifact.token
+    )
+  });
+
+  const now = new Date().toISOString();
+  const status = githubSyncStatus({
+    github: input.github,
+    autoUpdate: input.autoUpdate,
+    deployedHead: deployedSha,
+    lastSyncAt: now,
+    lastDeployAt: now
+  });
+
+  return {
+    workspace,
+    result: {
+      action: "reconcile",
+      status,
+      message: `Enabled the self-edit workspace with Cloudflare Artifacts repo ${namespace}/${artifact.name}. Sandbox and Containers remain optional upgrade steps for paid accounts.`,
+      ...(input.github.remoteHead ? { commitSha: input.github.remoteHead } : {}),
+      ...(deployedSha ? { deployedSha } : {})
+    }
+  };
+}
+
 async function uploadGeneratedWorkerFromGithub(input: {
   deployment: DeploymentRecord;
   target: DeploymentUpdateTarget;
@@ -411,7 +607,8 @@ async function uploadGeneratedWorkerFromGithub(input: {
       input.target,
       input.env,
       input.credential.source === "request-token" ? input.credential.apiToken : undefined,
-      sourceSha
+      sourceSha,
+      readDeploymentWorkspaceMetadata(input.deployment.resourcePlan)
     )
   });
 
@@ -524,6 +721,127 @@ function readDeploymentUpdateMetadata(
   return metadata;
 }
 
+function readDeploymentWorkspaceMetadata(
+  resourcePlan: Record<string, unknown>
+): DeploymentWorkspaceMetadata | undefined {
+  const value = readRecord(resourcePlan.openThinkWorkspace);
+  const generatedRuntime = readRecord(resourcePlan.generatedRuntime);
+  const generatedArtifact = readRecord(generatedRuntime?.artifact);
+  const usingGeneratedArtifact = !value && Boolean(generatedArtifact);
+  const artifactValue = readRecord(value?.artifact) ?? generatedArtifact;
+  const remote = readString(artifactValue?.remote);
+  const namespace = readString(artifactValue?.namespace);
+  const repo = readString(artifactValue?.repo) ?? readString(artifactValue?.name);
+  const defaultBranch =
+    readString(artifactValue?.defaultBranch) ??
+    readString(artifactValue?.default_branch) ??
+    "main";
+
+  if (!value && !remote) return undefined;
+
+  const workspace: DeploymentWorkspaceMetadata = {
+    mode: remote ? "artifacts-sandbox-workspace" : "basic-github-updates",
+    sandbox: {
+      status: readWorkspaceStatus(readRecord(value?.sandbox)?.status),
+      requiresPaidPlan: true
+    },
+    containers: {
+      status: readWorkspaceStatus(readRecord(value?.containers)?.status),
+      requiresPaidPlan: true
+    },
+    updatedAt:
+      readString(value?.updatedAt) ??
+      readString(artifactValue?.enabledAt) ??
+      new Date().toISOString()
+  };
+
+  if (remote && namespace && repo) {
+    workspace.artifact = {
+      namespace,
+      repo,
+      remote,
+      defaultBranch,
+      tokenSecretConfigured:
+        typeof artifactValue?.tokenSecretConfigured === "boolean"
+          ? artifactValue.tokenSecretConfigured
+          : !usingGeneratedArtifact,
+      enabledAt:
+        readString(artifactValue?.enabledAt) ??
+        readString(value?.updatedAt) ??
+        new Date().toISOString()
+    };
+    const tokenExpiresAt =
+      readString(artifactValue?.tokenExpiresAt) ?? readString(artifactValue?.token_expires_at);
+    if (tokenExpiresAt) workspace.artifact.tokenExpiresAt = tokenExpiresAt;
+  }
+
+  return workspace;
+}
+
+function buildWorkspaceCapabilityPlan(
+  resourcePlan: Record<string, unknown>,
+  env: Record<string, unknown>,
+  metadata?: DeploymentUpdateMetadata
+): DeploymentWorkspaceCapabilityPlan {
+  const workspace = readDeploymentWorkspaceMetadata(resourcePlan);
+  const repository =
+    readEnvString(env, "OPEN_THINK_UPDATE_REPOSITORY") ?? "NeoFlux-Holdings/OpenThink";
+  const branch =
+    metadata?.branch ??
+    readEnvString(env, "OPEN_THINK_UPDATE_BRANCH") ??
+    workspace?.artifact?.defaultBranch ??
+    "main";
+  const configured = Boolean(workspace?.artifact?.remote);
+  const artifacts: DeploymentWorkspaceCapabilityPlan["artifacts"] = {
+    status: configured ? "configured" : "upgradeable",
+    tokenSecretConfigured: Boolean(workspace?.artifact?.tokenSecretConfigured),
+    requiresPaidPlan: true,
+    description: configured
+      ? "A per-agent Cloudflare Artifacts Git workspace is attached for agent-owned code changes."
+      : "Optional. Add later to let the agent maintain a draft Git workspace for self-edits, testing, and PRs."
+  };
+  if (workspace?.artifact?.namespace) artifacts.namespace = workspace.artifact.namespace;
+  if (workspace?.artifact?.repo) artifacts.repo = workspace.artifact.repo;
+  if (workspace?.artifact?.remote) artifacts.remote = workspace.artifact.remote;
+  const artifactBranch = workspace?.artifact?.defaultBranch ?? branch;
+  if (artifactBranch) artifacts.branch = artifactBranch;
+  if (workspace?.artifact?.tokenExpiresAt) {
+    artifacts.tokenExpiresAt = workspace.artifact.tokenExpiresAt;
+  }
+
+  return {
+    mode: workspace?.mode ?? "basic-github-updates",
+    basicUpdates: {
+      status: "ready",
+      source: "github-upstream",
+      repository,
+      branch,
+      description:
+        "Remote OpenThink releases are pulled from GitHub and applied by uploading a regenerated Worker while preserving secrets and bindings."
+    },
+    artifacts,
+    sandbox: {
+      status: workspace?.sandbox.status ?? "not-configured",
+      requiresPaidPlan: true,
+      description:
+        "Optional execution layer for untrusted code, tests, terminals, file work, and generated app previews."
+    },
+    containers: {
+      status: workspace?.containers.status ?? "not-configured",
+      requiresPaidPlan: true,
+      description:
+        "Optional lower-level runtime for custom Docker images, long-running services, or workloads Sandbox does not fit."
+    },
+    recommendedNextAction: configured
+      ? "Use the Artifacts workspace for self-editing, then add Sandbox when the agent needs to run tests or commands."
+      : "Keep using GitHub upstream updates now; enable the Artifacts workspace later when the account has the paid capability."
+  };
+}
+
+function readWorkspaceStatus(value: unknown): "not-configured" | "ready-to-add" {
+  return value === "ready-to-add" ? "ready-to-add" : "not-configured";
+}
+
 function withDeploymentUpdateMetadata(
   resourcePlan: Record<string, unknown>,
   metadata: DeploymentUpdateMetadata
@@ -531,6 +849,16 @@ function withDeploymentUpdateMetadata(
   return {
     ...resourcePlan,
     openThinkUpdate: metadata
+  };
+}
+
+function withDeploymentWorkspaceMetadata(
+  resourcePlan: Record<string, unknown>,
+  workspace: DeploymentWorkspaceMetadata
+): Record<string, unknown> {
+  return {
+    ...resourcePlan,
+    openThinkWorkspace: workspace
   };
 }
 
@@ -592,7 +920,9 @@ function buildDeploymentSyncEnv(
         deployment,
         target,
         env,
-        credentialSource === "request-token" ? apiToken : undefined
+        credentialSource === "request-token" ? apiToken : undefined,
+        undefined,
+        readDeploymentWorkspaceMetadata(deployment.resourcePlan)
       )
     ),
     OPEN_THINK_AUTO_SYNC: String(autoUpdate.enabled),
@@ -606,7 +936,9 @@ function buildWorkerUploadMetadata(
   target: DeploymentUpdateTarget,
   env: Record<string, unknown>,
   agentCloudflareApiToken?: string,
-  sourceSha?: string
+  sourceSha?: string,
+  workspace?: DeploymentWorkspaceMetadata,
+  artifactToken?: string
 ): {
   main_module: string;
   compatibility_date: string;
@@ -722,6 +1054,52 @@ function buildWorkerUploadMetadata(
       text: sourceSha
     });
   }
+  if (workspace) {
+    bindings.push({
+      type: "plain_text",
+      name: "OPEN_THINK_WORKSPACE_MODE",
+      text: workspace.mode
+    });
+    bindings.push({
+      type: "plain_text",
+      name: "OPEN_THINK_SANDBOX_STATUS",
+      text: workspace.sandbox.status
+    });
+    bindings.push({
+      type: "plain_text",
+      name: "OPEN_THINK_CONTAINER_STATUS",
+      text: workspace.containers.status
+    });
+    if (workspace.artifact) {
+      bindings.push({
+        type: "plain_text",
+        name: "OPEN_THINK_ARTIFACTS_NAMESPACE",
+        text: workspace.artifact.namespace
+      });
+      bindings.push({
+        type: "plain_text",
+        name: "OPEN_THINK_ARTIFACTS_REPO",
+        text: workspace.artifact.repo
+      });
+      bindings.push({
+        type: "plain_text",
+        name: "OPEN_THINK_ARTIFACTS_REMOTE",
+        text: workspace.artifact.remote
+      });
+      bindings.push({
+        type: "plain_text",
+        name: "ARTIFACTS_BRANCH",
+        text: workspace.artifact.defaultBranch
+      });
+    }
+  }
+  if (artifactToken) {
+    bindings.push({
+      type: "secret_text",
+      name: "OPEN_THINK_ARTIFACTS_TOKEN",
+      text: artifactToken
+    });
+  }
 
   return {
     main_module: "worker.js",
@@ -833,6 +1211,24 @@ function normalizeThinkingLevel(value: string): "low" | "medium" | "high" | "xhi
     return value;
   }
   return "medium";
+}
+
+function artifactRepoName(scriptName: string): string {
+  return scriptName
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
+}
+
+function readPositiveInteger(
+  env: Record<string, unknown>,
+  key: string
+): number | undefined {
+  const value = readEnvString(env, key);
+  if (!value) return undefined;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function shortSha(value: string): string {

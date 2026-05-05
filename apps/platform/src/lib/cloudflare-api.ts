@@ -19,6 +19,7 @@ export interface CloudflareResourcePlan {
   accountId: string;
   scriptName: string;
   generatedRuntime?: GeneratedRuntimePublishResult;
+  openThinkWorkspace?: Record<string, unknown>;
   d1Database: {
     name: string;
     id?: string;
@@ -1037,6 +1038,31 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
       runtimePublishInput.apiToken = runtimeApiToken;
     }
     const generatedRuntime = await this.runtimePublisher.publish(runtimePublishInput);
+    const openThinkWorkspace = generatedRuntime.artifact
+      ? {
+          mode: "artifacts-sandbox-workspace",
+          artifact: {
+            namespace: generatedRuntime.artifact.namespace,
+            repo: generatedRuntime.artifact.repo,
+            remote: generatedRuntime.artifact.remote,
+            defaultBranch: generatedRuntime.artifact.defaultBranch,
+            tokenSecretConfigured: false,
+            ...(generatedRuntime.artifact.tokenExpiresAt
+              ? { tokenExpiresAt: generatedRuntime.artifact.tokenExpiresAt }
+              : {}),
+            enabledAt: new Date().toISOString()
+          },
+          sandbox: {
+            status: "ready-to-add",
+            requiresPaidPlan: true
+          },
+          containers: {
+            status: "ready-to-add",
+            requiresPaidPlan: true
+          },
+          updatedAt: new Date().toISOString()
+        }
+      : undefined;
 
     await this.client.enableWorkerSubdomain(names.script);
     const workersSubdomain = await this.client.getWorkersSubdomain();
@@ -1098,6 +1124,7 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
       accountId: this.clientAccountId,
       scriptName: names.script,
       generatedRuntime,
+      ...(openThinkWorkspace ? { openThinkWorkspace } : {}),
       d1Database: d1Plan,
       r2Bucket: {
         name: r2Bucket.name
@@ -1412,6 +1439,21 @@ function generateWorkerUploadMetadata(input: {
         type: "plain_text",
         name: "OPEN_THINK_UPDATE_BUNDLE_PATH",
         text: "dist/worker.js"
+      },
+      {
+        type: "plain_text",
+        name: "OPEN_THINK_WORKSPACE_MODE",
+        text: "basic-github-updates"
+      },
+      {
+        type: "plain_text",
+        name: "OPEN_THINK_SANDBOX_STATUS",
+        text: "not-configured"
+      },
+      {
+        type: "plain_text",
+        name: "OPEN_THINK_CONTAINER_STATUS",
+        text: "not-configured"
       },
       ...(input.sourceSha
         ? [
