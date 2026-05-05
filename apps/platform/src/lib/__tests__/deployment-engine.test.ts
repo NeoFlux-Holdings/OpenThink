@@ -98,4 +98,63 @@ describe("DeploymentEngine", () => {
       )
     ).rejects.toBeInstanceOf(DeploymentValidationError);
   });
+
+  it("rejects custom personal agent setup without a name or soul prompt", async () => {
+    const engine = new DeploymentEngine({
+      platformHost: "beta2.open-think.app",
+      provisioner: {
+        async provision() {
+          throw new Error("should not provision");
+        }
+      }
+    });
+
+    await expect(
+      engine.deploy(
+        buildDeploymentRequest("self", {
+          starterTemplate: "personal-agent",
+          userId: "test-user",
+          cloudflareAccountId: "acct",
+          accessAllowedEmail: "owner@example.com",
+          cfApiToken: "token",
+          spendLimitUsd: 100,
+          acceptedTerms: true,
+          personalAgent: {
+            enabled: true,
+            presetId: "custom"
+          }
+        })
+      )
+    ).rejects.toBeInstanceOf(DeploymentValidationError);
+  });
+
+  it("rejects unsupported MCP tool approval policies", async () => {
+    const engine = new DeploymentEngine({
+      platformHost: "beta2.open-think.app",
+      provisioner: {
+        async provision() {
+          throw new Error("should not provision");
+        }
+      }
+    });
+
+    await expect(
+      engine.deploy(
+        buildDeploymentRequest("self", {
+          starterTemplate: "personal-agent",
+          userId: "test-user",
+          cloudflareAccountId: "acct",
+          accessAllowedEmail: "owner@example.com",
+          cfApiToken: "token",
+          spendLimitUsd: 100,
+          acceptedTerms: true,
+          personalAgent: {
+            enabled: true,
+            presetId: "openthink-gbrain-gstack",
+            toolApprovalPolicy: "unsafe" as never
+          }
+        })
+      )
+    ).rejects.toBeInstanceOf(DeploymentValidationError);
+  });
 });

@@ -1,4 +1,8 @@
 import type { DeploymentRequest } from "./deployment-engine";
+import {
+  normalizePersonalAgentConfig,
+  publicPersonalAgentConfig
+} from "./personal-agent-options";
 
 function inferTemplateModelProvider(
   model: string | undefined
@@ -25,6 +29,8 @@ export function renderAgentWorkerModule(input: {
   const defaultModel = JSON.stringify(input.request.defaultModel ?? "@cf/moonshotai/kimi-k2.6");
   const modelProvider = JSON.stringify(input.request.modelProvider ?? inferTemplateModelProvider(input.request.defaultModel));
   const thinkingLevel = JSON.stringify(input.request.thinkingLevel ?? "medium");
+  const personalAgentConfig = normalizePersonalAgentConfig(input.request.personalAgent);
+  const personalAgentConfigLiteral = JSON.stringify(publicPersonalAgentConfig(personalAgentConfig));
   const appHtml = JSON.stringify(renderAgentAppHtml());
 
   return `
@@ -38,10 +44,11 @@ const scriptName = ${scriptName};
 const defaultModel = ${defaultModel};
 const modelProvider = ${modelProvider};
 const thinkingLevel = ${thinkingLevel};
+const generatedPersonalAgentConfig = ${personalAgentConfigLiteral};
 const appHtml = ${appHtml};
 const runtimeAwarenessVersion = "2026-05-04.2";
 const capabilities = ["chat", "coding", "messaging", "files", "memory", "tasks", "terminal", "mcp", "cloudflare-api", "self-update", "binding-management", "cloudflare-sandbox-planning", "cloudflare-container-planning", "cloudflare-app-deployment-planning"];
-const endpoints = ["/", "/health", "/manifest", "/skills", "/chat", "/projects", "/threads", "/messages", "/memory", "/files", "/tasks", "/terminal", "/secrets", "/updates/status", "/updates/remote", "/updates/apply", "/updates/bindings", "/runtime/context", "/cloudflare/status", "/cloudflare/api", "/mcp/cloudflare", "/mcp/servers", "/mcp/tools", "/mcp/call"];
+const endpoints = ["/", "/health", "/manifest", "/skills", "/chat", "/chat?stream=1", "/projects", "/threads", "/messages", "/memory", "/personal-agent/setup", "/files", "/tasks", "/terminal", "/secrets", "/updates/status", "/updates/remote", "/updates/apply", "/updates/bindings", "/runtime/context", "/cloudflare/status", "/cloudflare/api", "/mcp/cloudflare", "/mcp/servers", "/mcp/tools", "/mcp/call"];
 
 export default {
   async fetch(request, env) {
@@ -52,6 +59,7 @@ export default {
     }
 
     if (url.pathname === "/health") {
+      const personalAgent = await personalAgentRuntimeState(env);
       return Response.json({
         ok: true,
         deploymentId,
@@ -62,13 +70,21 @@ export default {
         defaultModel: env.OPEN_THINK_DEFAULT_MODEL || defaultModel,
         modelProvider: env.OPEN_THINK_MODEL_PROVIDER || modelProvider,
         thinkingLevel: env.OPEN_THINK_THINKING_LEVEL || thinkingLevel,
+        personalAgent,
         runtimeAwarenessVersion,
         capabilities,
+        chat: {
+          defaultTransport: "server-sent-events",
+          streamEndpoint: "/chat?stream=1",
+          jsonEndpoint: "/chat",
+          agentsSdkWebSocket: "available in package runtime at /agents/personal-chat-agent/default"
+        },
         bindings: bindingStatus(env)
       });
     }
 
     if (url.pathname === "/manifest") {
+      const personalAgent = await personalAgentRuntimeState(env);
       return Response.json({
         deploymentId,
         agentName,
@@ -78,10 +94,17 @@ export default {
         defaultModel: env.OPEN_THINK_DEFAULT_MODEL || defaultModel,
         modelProvider: env.OPEN_THINK_MODEL_PROVIDER || modelProvider,
         thinkingLevel: env.OPEN_THINK_THINKING_LEVEL || thinkingLevel,
+        personalAgent,
         runtimeAwarenessVersion,
         cloudflareAccountId: env.OPEN_THINK_CF_ACCOUNT_ID || cloudflareAccountId || null,
         capabilities,
         endpoints,
+        chat: {
+          transports: ["server-sent-events", "json"],
+          streamEndpoint: "/chat?stream=1",
+          agentsSdkWebSocket: "/agents/personal-chat-agent/default",
+          notes: "Raw Worker deployments stream response chunks over SSE. Agents SDK package deployments use AIChatAgent WebSocket streaming and resumable SQLite chat."
+        },
         skills: cloudflarePlatformSkills(env),
         mcp: {
           cloudflareApi: {
@@ -151,6 +174,10 @@ export default {
         "select id, text, created_at from memories order by created_at desc limit 50"
       ).all();
       return Response.json({ memories: rows.results ?? [] });
+    }
+
+    if (url.pathname === "/personal-agent/setup" && request.method === "GET") {
+      return Response.json(await personalAgentRuntimeState(env));
     }
 
     if (url.pathname === "/files" && request.method === "PUT") {
@@ -299,6 +326,7 @@ export default {
 };
 
 async function handleChat(request, env) {
+  const url = new URL(request.url);
   const payload = await request.json().catch(() => ({}));
   const message = String(payload.message ?? "").trim();
   if (!message) {
@@ -310,11 +338,67 @@ async function handleChat(request, env) {
     return Response.json({ error: "Workers AI binding is not configured." }, { status: 503 });
   }
 
+  const wantsStream = payload.stream === true ||
+    url.searchParams.get("stream") === "1" ||
+    (request.headers.get("accept") || "").toLowerCase().includes("text/event-stream");
+
+  if (wantsStream) {
+    return streamChatResponse(payload, env, modelSettings);
+  }
+
+  return Response.json(await resolveChatResponse(payload, env, modelSettings));
+}
+
+function streamChatResponse(payload, env, modelSettings) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = (event, data) => {
+        controller.enqueue(encoder.encode("event: " + event + "\\ndata: " + JSON.stringify(data) + "\\n\\n"));
+      };
+
+      Promise.resolve()
+        .then(async () => {
+          send("status", { status: "thinking" });
+          const result = await resolveChatResponse(payload, env, modelSettings);
+          send("metadata", {
+            deploymentId: result.deploymentId,
+            projectId: result.projectId,
+            threadId: result.threadId,
+            model: result.model,
+            modelProvider: result.modelProvider
+          });
+          for (const chunk of textChunks(result.output)) {
+            send("delta", { content: chunk });
+            await Promise.resolve();
+          }
+          send("done", result);
+          controller.close();
+        })
+        .catch((error) => {
+          send("error", { error: error instanceof Error ? error.message : "Chat stream failed." });
+          controller.close();
+        });
+    }
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive"
+    }
+  });
+}
+
+async function resolveChatResponse(payload, env, modelSettings) {
+  const message = String(payload.message ?? "").trim();
   let projectId = String(payload.projectId ?? "").trim();
   let threadId = String(payload.threadId ?? "").trim();
   let history = [];
   if (env.DB) {
     await ensureConversationTables(env);
+    await ensurePersonalAgentSetup(env);
     projectId = projectId || await ensureDefaultProject(env);
     threadId = threadId || await ensureDefaultThread(env, projectId);
     history = await recentConversationMessages(env, threadId, 10);
@@ -322,6 +406,7 @@ async function handleChat(request, env) {
   }
 
   const runtime = await runtimeSnapshot(env);
+  const personalAgent = resolvePersonalAgentConfig(env);
   const memoryContext = await memoryList(env, 12).catch((error) => ({
     available: false,
     error: error instanceof Error ? error.message : "Memory lookup failed.",
@@ -342,6 +427,7 @@ async function handleChat(request, env) {
       content: [
         "You are " + agentName + ", an open-think personal agent running on Cloudflare.",
         "You help with coding, messaging, chat, task planning, files, memory, Cloudflare operations, terminal workflows, source updates, MCP-oriented tool use, and selecting the right Cloudflare primitive for new software.",
+        personalAgentSystemInstruction(personalAgent),
         "You have direct awareness of this deployment through the runtime snapshot below. Do not say you lack the script name, D1 memory table, bindings, update strategy, or Cloudflare account context when it is present in that snapshot.",
         "You have explicit Cloudflare platform skills in the runtime snapshot. When asked about Sandbox, Containers, Workers, Pages, or deploying new software, use those skills. Do not claim Containers or Sandbox are impossible; say whether they are available in this runtime, what account plan/bindings are required, and how you would add them.",
         "Decision rule: Workers/Pages first for HTTP apps, APIs, static sites, scheduled jobs, queues, and edge-native integrations. Sandbox for untrusted or agent-generated code execution, command execution, file work, browser terminals, preview URLs, data analysis, and ephemeral IDE/CI workflows. Containers for custom runtimes, existing Docker images, long-running services, heavier CPU/memory/disk, Linux tools, or servers that Workers cannot run. Durable Objects coordinate stateful sessions and per-user instances. R2, D1, Queues, Vectorize, AI, Workflows, and Access compose around these choices.",
@@ -351,7 +437,7 @@ async function handleChat(request, env) {
         "R2 files are available through files_list and /files. Tasks are available through queue_task and /tasks. Runtime and update status are available through runtime_status and /runtime/context.",
         "Vectorize is provisioned as semantic memory when the VECTORIZE binding is present; explain that vector query wiring is a next runtime tool if no direct vector query tool is available.",
         "For source updates, explain three lanes: default managed updates from the configured GitHub NeoFlux-Holdings/OpenThink repository through the platform reconciler; optional self-editing through a per-agent Cloudflare Artifacts workspace plus Sandbox/Containers when enabled; and this runtime's /updates/apply endpoint for a verified built worker.js bundle. Managed GitHub updates are preferred for upstream releases. The Artifacts/Sandbox lane is for agent-authored changes, tests, diffs, and PR preparation, and can be added later when the account has paid capabilities.",
-        "For resets, prefer the platform /api/deployment/update action reset. Source restore reuploads the generated Worker from GitHub and keeps workspace metadata. Factory reset also disables auto update, removes workspace metadata and custom non-secret bindings, restores Kimi K2.6 Workers AI defaults, and preserves encrypted Worker secrets. Require explicit owner confirmation before reset.",
+        "For resets, prefer the platform /api/deployment/update action reset. Source restore reuploads the generated Worker from GitHub and keeps workspace metadata and the current personal-agent brain. Factory reset also disables auto update, removes workspace metadata and custom non-secret bindings, clears the personal-agent brain unless the reset payload reconfigures it, restores Kimi K2.6 Workers AI defaults, and preserves encrypted Worker secrets. Require explicit owner confirmation before reset.",
         "If local agent changes and remote updates both exist, use this order: snapshot current runtime status, identify local changes or bindings/secrets, fetch remote status, propose rebase or reconcile, ask before destructive replacement, then deploy with secret preservation. Treat this as the update-management playbook.",
         "Secrets are managed through /secrets and the secret_put tool. Non-secret bindings are managed through /updates/bindings and the binding_add tool, which patches Worker script settings. For new resource-backed bindings, create or identify the Cloudflare resource first, then bind its id/name.",
         "When the owner asks for Cloudflare operations, use the mcp_call tool. For destructive or expensive actions, explain the exact operation and ask for confirmation before using execute.",
@@ -384,7 +470,7 @@ async function handleChat(request, env) {
     await saveConversationMessage(env, threadId, "agent", responseText);
   }
 
-  return Response.json({
+  return {
     deploymentId,
     starterTemplate,
     projectId: projectId || null,
@@ -394,7 +480,17 @@ async function handleChat(request, env) {
     output: responseText,
     toolResults,
     usage: output?.usage ?? null
-  });
+  };
+}
+
+function textChunks(text) {
+  const value = String(text || "");
+  const chunks = [];
+  const size = 220;
+  for (let index = 0; index < value.length; index += size) {
+    chunks.push(value.slice(index, index + size));
+  }
+  return chunks.length ? chunks : [""];
 }
 
 function resolveModelSettings(env) {
@@ -1099,6 +1195,7 @@ function workspaceStatus(env) {
 async function runtimeSnapshot(env) {
   const accountId = env.OPEN_THINK_CF_ACCOUNT_ID || cloudflareAccountId || null;
   const currentScript = runtimeScriptName(env) || null;
+  const personalAgent = await personalAgentRuntimeState(env);
   return {
     runtimeAwarenessVersion,
     deploymentId,
@@ -1118,6 +1215,7 @@ async function runtimeSnapshot(env) {
         openai: Boolean(env.OPENAI_API_KEY)
       }
     },
+    personalAgent,
     bindings: bindingStatus(env),
     storage: {
       d1MemoryTable: env.DB ? "memories" : null,
@@ -1826,6 +1924,279 @@ async function cloudflareApi(env, path, init = {}) {
   return body?.result ?? body;
 }
 
+function resolvePersonalAgentConfig(env) {
+  const raw = env.OPEN_THINK_PERSONAL_AGENT_CONFIG;
+  let parsed = generatedPersonalAgentConfig;
+  if (typeof raw === "string" && raw.trim()) {
+    parsed = parseJson(raw, generatedPersonalAgentConfig);
+  }
+  const config = parsed && typeof parsed === "object" ? parsed : generatedPersonalAgentConfig;
+  const features = config.features && typeof config.features === "object" ? config.features : {};
+  const enabledFeatures = Array.isArray(config.enabledFeatures)
+    ? config.enabledFeatures.map(String).filter(Boolean)
+    : Object.keys(features).filter((key) => Boolean(features[key]));
+  const setupSteps = Array.isArray(config.setupSteps) ? config.setupSteps.map(String) : [];
+  const resolved = {
+    enabled: Boolean(config.enabled),
+    presetId: String(config.presetId || "openthink-gbrain-gstack"),
+    label: String(config.label || "OpenThink gbrain + gstack"),
+    stack: String(config.stack || "gstack"),
+    brain: String(config.brain || "gbrain"),
+    summary: String(config.summary || "Cloudflare-native personal agent setup."),
+    setupKind: String(config.setupKind || "native"),
+    advancedMode: Boolean(config.advancedMode),
+    features,
+    enabledFeatures,
+    setupSteps,
+    setupStatus: String(config.setupStatus || (config.enabled ? "complete" : "disabled")),
+    soulPromptConfigured: Boolean(config.enabled && (config.soulPromptConfigured || config.soulPrompt)),
+    launchBriefConfigured: Boolean(config.enabled && (config.launchBriefConfigured || config.launchBrief))
+  };
+  if (typeof config.customName === "string" && config.customName.trim()) resolved.customName = config.customName.trim();
+  if (typeof config.externalEndpoint === "string" && config.externalEndpoint.trim()) resolved.externalEndpoint = config.externalEndpoint.trim();
+  if (typeof config.sourceLabel === "string" && config.sourceLabel.trim()) resolved.sourceLabel = config.sourceLabel.trim();
+  if (typeof config.sourceUrl === "string" && config.sourceUrl.trim()) resolved.sourceUrl = config.sourceUrl.trim();
+  if (resolved.enabled && typeof config.soulPrompt === "string" && config.soulPrompt.trim()) {
+    resolved.soulPrompt = config.soulPrompt.trim();
+    resolved.soulPromptConfigured = true;
+  }
+  if (resolved.enabled && resolved.soulPromptConfigured && typeof env.OPEN_THINK_SOUL_PROMPT === "string" && env.OPEN_THINK_SOUL_PROMPT.trim()) {
+    resolved.soulPrompt = env.OPEN_THINK_SOUL_PROMPT.trim();
+  }
+  if (resolved.enabled && typeof config.launchBrief === "string" && config.launchBrief.trim()) {
+    resolved.launchBrief = config.launchBrief.trim();
+    resolved.launchBriefConfigured = true;
+  }
+  if (resolved.enabled && resolved.launchBriefConfigured && typeof env.OPEN_THINK_LAUNCH_BRIEF === "string" && env.OPEN_THINK_LAUNCH_BRIEF.trim()) {
+    resolved.launchBrief = env.OPEN_THINK_LAUNCH_BRIEF.trim();
+  }
+  return resolved;
+}
+
+function publicPersonalAgentRuntimeConfig(config) {
+  const copy = { ...config };
+  const soulPromptConfigured = Boolean(copy.soulPromptConfigured || copy.soulPrompt);
+  const launchBriefConfigured = Boolean(copy.launchBriefConfigured || copy.launchBrief);
+  delete copy.soulPrompt;
+  delete copy.launchBrief;
+  return { ...copy, soulPromptConfigured, launchBriefConfigured };
+}
+
+async function personalAgentRuntimeState(env) {
+  const config = resolvePersonalAgentConfig(env);
+  const publicConfig = publicPersonalAgentRuntimeConfig(config);
+  if (!config.enabled) {
+    return {
+      enabled: false,
+      config: publicConfig,
+      setup: { status: "disabled" }
+    };
+  }
+
+  try {
+    return {
+      enabled: true,
+      config: publicConfig,
+      setup: await ensurePersonalAgentSetup(env, config)
+    };
+  } catch (error) {
+    return {
+      enabled: true,
+      config: publicConfig,
+      setup: {
+        status: "error",
+        error: error instanceof Error ? error.message : "Personal agent setup failed."
+      }
+    };
+  }
+}
+
+async function ensurePersonalAgentSetup(env, config = resolvePersonalAgentConfig(env)) {
+  if (!config.enabled) return { status: "disabled" };
+  if (!env.DB) {
+    return {
+      status: "pending",
+      error: "D1 binding is not configured."
+    };
+  }
+
+  await ensureMemoryTable(env);
+  await env.DB.prepare(
+    "create table if not exists personal_agent_setup (id text primary key, preset_id text not null, label text not null, stack text not null, brain text not null, setup_kind text not null, setup_status text not null, advanced_mode integer not null, config_json text not null, setup_steps_json text not null, created_at text not null, updated_at text not null)"
+  ).run();
+  await env.DB.prepare(
+    "create table if not exists personal_agent_feature_flags (feature_key text primary key, enabled integer not null, updated_at text not null)"
+  ).run();
+
+  const now = new Date().toISOString();
+  const existing = await env.DB.prepare(
+    "select id from personal_agent_setup where id = ?"
+  ).bind("personal-agent").first();
+  const publicConfig = publicPersonalAgentRuntimeConfig(config);
+  const setupSteps = JSON.stringify(config.setupSteps || []);
+  await env.DB.prepare(
+    "insert or ignore into personal_agent_setup (id, preset_id, label, stack, brain, setup_kind, setup_status, advanced_mode, config_json, setup_steps_json, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).bind(
+    "personal-agent",
+    config.presetId,
+    config.label,
+    config.stack,
+    config.brain,
+    config.setupKind,
+    config.setupStatus,
+    config.advancedMode ? 1 : 0,
+    JSON.stringify(publicConfig),
+    setupSteps,
+    now,
+    now
+  ).run();
+  await env.DB.prepare(
+    "update personal_agent_setup set preset_id = ?, label = ?, stack = ?, brain = ?, setup_kind = ?, setup_status = ?, advanced_mode = ?, config_json = ?, setup_steps_json = ?, updated_at = ? where id = ?"
+  ).bind(
+    config.presetId,
+    config.label,
+    config.stack,
+    config.brain,
+    config.setupKind,
+    config.setupStatus,
+    config.advancedMode ? 1 : 0,
+    JSON.stringify(publicConfig),
+    setupSteps,
+    now,
+    "personal-agent"
+  ).run();
+  for (const [featureKey, enabled] of Object.entries(config.features || {})) {
+    await env.DB.prepare(
+      "insert or replace into personal_agent_feature_flags (feature_key, enabled, updated_at) values (?, ?, ?)"
+    ).bind(featureKey, enabled ? 1 : 0, now).run();
+  }
+  await env.DB.prepare(
+    "insert or ignore into memories (id, text, created_at) values (?, ?, ?)"
+  ).bind(
+    "setup:" + deploymentId + ":personal-agent",
+    buildPersonalAgentSetupMemory(config),
+    now
+  ).run();
+  if (config.launchBrief) {
+    await env.DB.prepare(
+      "insert or replace into memories (id, text, created_at) values (?, ?, ?)"
+    ).bind(
+      "setup:" + deploymentId + ":launch-brief",
+      "Initial launch brief for " + config.label + ":\\n" + config.launchBrief,
+      now
+    ).run();
+  }
+  if (!existing) {
+    await queuePersonalAgentSetupTask(env, config, now);
+  }
+
+  const row = await env.DB.prepare(
+    "select id, preset_id, label, stack, brain, setup_kind, setup_status, advanced_mode, config_json, setup_steps_json, created_at, updated_at from personal_agent_setup where id = ?"
+  ).bind("personal-agent").first();
+  return {
+    status: row?.setup_status || config.setupStatus,
+    table: "personal_agent_setup",
+    record: row ? {
+      id: row.id,
+      presetId: row.preset_id,
+      label: row.label,
+      stack: row.stack,
+      brain: row.brain,
+      setupKind: row.setup_kind,
+      advancedMode: Boolean(row.advanced_mode),
+      config: parseJson(row.config_json, publicConfig),
+      setupSteps: parseJson(row.setup_steps_json, config.setupSteps || []),
+      featureFlags: await readPersonalAgentFeatureFlags(env),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    } : null
+  };
+}
+
+async function readPersonalAgentFeatureFlags(env) {
+  if (!env.DB) return [];
+  const rows = await env.DB.prepare(
+    "select feature_key, enabled, updated_at from personal_agent_feature_flags order by feature_key asc"
+  ).all();
+  return (rows.results || []).map((row) => ({
+    key: row.feature_key,
+    enabled: Boolean(row.enabled),
+    updatedAt: row.updated_at
+  }));
+}
+
+async function queuePersonalAgentSetupTask(env, config, now) {
+  if (!env.TASK_QUEUE) return;
+  await env.TASK_QUEUE.send({
+    deploymentId,
+    agentName,
+    kind: "personal-agent-setup",
+    createdAt: now,
+    payload: {
+      presetId: config.presetId,
+      label: config.label,
+      stack: config.stack,
+      brain: config.brain,
+      setupKind: config.setupKind,
+      setupStatus: config.setupStatus,
+      enabledFeatures: config.enabledFeatures || [],
+      soulPromptConfigured: Boolean(config.soulPromptConfigured),
+      launchBriefConfigured: Boolean(config.launchBriefConfigured),
+      externalEndpoint: config.externalEndpoint || null,
+      setupSteps: config.setupSteps || []
+    }
+  });
+}
+
+function personalAgentSystemInstruction(config) {
+  if (!config.enabled) {
+    return "Personal agent subsystem setup is disabled. Use the built-in OpenThink runtime defaults.";
+  }
+  const featureList = (config.enabledFeatures || []).join(", ") || "none";
+  const parts = [
+    "Personal agent subsystem: " + config.label + ".",
+    "Stack: " + config.stack + ". Brain: " + config.brain + ".",
+    "Setup status: " + config.setupStatus + ". Enabled features: " + featureList + ".",
+    "Honor this brain/stack profile when choosing memory, MCP, task, file, and automation behavior.",
+    config.setupStatus === "external-runtime-needed"
+      ? "The OpenThink bootstrap has been seeded, but the external runtime still needs owner-provided endpoint, credentials, or workstation setup before you claim it is connected."
+      : "The OpenThink runtime bootstrap has been seeded automatically."
+  ];
+  if (config.externalEndpoint) {
+    parts.push("External endpoint configured: " + config.externalEndpoint + ".");
+  }
+  if (config.soulPrompt) {
+    parts.push("Owner soul prompt:\\n" + config.soulPrompt);
+  }
+  if (config.launchBrief) {
+    parts.push("Initial launch brief:\\n" + config.launchBrief);
+  }
+  return parts.join("\\n");
+}
+
+function buildPersonalAgentSetupMemory(config) {
+  return [
+    "Personal agent setup selected " + config.label + ".",
+    "Stack " + config.stack + ".",
+    "Brain " + config.brain + ".",
+    "Enabled features " + ((config.enabledFeatures || []).join(", ") || "none") + ".",
+    config.soulPromptConfigured ? "A custom soul prompt is configured." : "No custom soul prompt is configured.",
+    config.launchBriefConfigured ? "An initial launch brief is configured." : "No initial launch brief is configured.",
+    config.setupStatus === "external-runtime-needed"
+      ? "External runtime connection remains as an owner follow-up."
+      : "Runtime setup is complete."
+  ].join(" ");
+}
+
+function parseJson(value, fallback) {
+  if (typeof value !== "string") return fallback;
+  try {
+    return JSON.parse(value);
+  } catch (_error) {
+    return fallback;
+  }
+}
+
 async function ensureMemoryTable(env) {
   await env.DB.prepare(
     "create table if not exists memories (id text primary key, text text not null, created_at text not null)"
@@ -2288,6 +2659,30 @@ function renderAgentAppHtml(): string {
         linear-gradient(180deg, rgba(255,252,245,0.7), rgba(255,252,245,0.98));
     }
 
+    .chat-status {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid var(--line);
+      padding: 9px 14px;
+      color: var(--ink-soft);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+    }
+
+    .chat-status[data-state="streaming"] {
+      color: var(--blue);
+      background: rgba(45, 95, 154, 0.06);
+    }
+
+    .chat-status[data-state="error"] {
+      color: var(--red);
+      background: rgba(180, 59, 53, 0.06);
+    }
+
     .message {
       align-self: start;
       max-width: 86%;
@@ -2302,6 +2697,11 @@ function renderAgentAppHtml(): string {
       justify-self: end;
       border-color: rgba(223, 111, 33, 0.34);
       background: #fff4e9;
+    }
+
+    .message[data-streaming="true"] {
+      border-color: rgba(45, 95, 154, 0.32);
+      background: rgba(45, 95, 154, 0.06);
     }
 
     .message small {
@@ -2401,6 +2801,12 @@ function renderAgentAppHtml(): string {
       gap: 10px;
       border-top: 1px solid var(--line);
       padding: 14px;
+    }
+
+    .composer-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
     }
 
     input, textarea {
@@ -2727,9 +3133,16 @@ function renderAgentAppHtml(): string {
         </div>
         <div class="meta-strip" id="chat-meta">Loading project context...</div>
         <div class="chat-log" id="chat-log"></div>
+        <div class="chat-status" id="chat-status" data-state="idle">
+          <span>SSE ready</span>
+          <span id="chat-status-detail">Idle</span>
+        </div>
         <form class="composer" id="chat-form">
           <input id="chat-input" name="message" placeholder="Ask your agent to build, explain, plan, or operate..." autocomplete="off" />
-          <button class="button button-primary" type="submit">Send</button>
+          <div class="composer-actions">
+            <button class="button button-primary" type="submit">Send</button>
+            <button class="button" id="chat-stop" type="button" disabled>Stop</button>
+          </div>
         </form>
       </section>
 
@@ -2925,7 +3338,7 @@ function renderAgentAppHtml(): string {
   </main>
 
   <script>
-    const state = { manifest: null, health: null, mcpServers: [], projects: [], threads: [], projectId: "", threadId: "", activeTab: "chat" };
+    const state = { manifest: null, health: null, mcpServers: [], projects: [], threads: [], projectId: "", threadId: "", activeTab: "chat", chatAbortController: null };
     const $ = (id) => document.getElementById(id);
 
     function escapeText(value) {
@@ -2974,13 +3387,28 @@ function renderAgentAppHtml(): string {
       }).join("");
     }
 
-    function addMessage(role, text) {
+    function addMessage(role, text, options = {}) {
       const node = document.createElement("article");
       node.className = "message";
       node.dataset.role = role;
+      if (options.streaming) node.dataset.streaming = "true";
       node.innerHTML = '<small>' + escapeText(role) + '</small><div class="message-content">' + renderMessageText(text) + '</div>';
       $("chat-log").appendChild(node);
       $("chat-log").scrollTop = $("chat-log").scrollHeight;
+      return node;
+    }
+
+    function updateMessage(node, text) {
+      const content = node.querySelector(".message-content");
+      if (content) content.innerHTML = renderMessageText(text || "");
+      $("chat-log").scrollTop = $("chat-log").scrollHeight;
+    }
+
+    function setChatStatus(stateName, detail) {
+      const status = $("chat-status");
+      if (!status) return;
+      status.dataset.state = stateName;
+      $("chat-status-detail").textContent = detail;
     }
 
     function setActiveTab(tab) {
@@ -3004,6 +3432,45 @@ function renderAgentAppHtml(): string {
       return data;
     }
 
+    async function readEventStream(response, onEvent) {
+      if (!response.body) throw new Error("Streaming response body is unavailable.");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const blocks = buffer.split(/\\r?\\n\\r?\\n/);
+        buffer = blocks.pop() || "";
+        for (const block of blocks) {
+          const event = parseEventBlock(block);
+          if (event) onEvent(event.name, event.data);
+        }
+      }
+
+      const event = parseEventBlock(buffer);
+      if (event) onEvent(event.name, event.data);
+    }
+
+    function parseEventBlock(block) {
+      const lines = String(block || "").split(/\\r?\\n/);
+      let name = "message";
+      const dataLines = [];
+      for (const line of lines) {
+        if (line.startsWith("event:")) name = line.slice(6).trim();
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+      }
+      if (!dataLines.length) return null;
+      const raw = dataLines.join("\\n");
+      try {
+        return { name, data: JSON.parse(raw) };
+      } catch {
+        return { name, data: { text: raw } };
+      }
+    }
+
     async function loadBasics() {
       state.manifest = await jsonFetch("/manifest");
       state.health = await jsonFetch("/health");
@@ -3016,6 +3483,7 @@ function renderAgentAppHtml(): string {
         metric("R2", state.health.bindings.storage ? "Artifacts ready" : "Missing"),
         metric("Queue", state.health.bindings.queue ? "Tasks ready" : "Missing"),
         metric("Vectorize", state.health.bindings.vectorize ? "Semantic memory bound" : "Missing"),
+        metric("Chat", state.health.chat?.defaultTransport || "server-sent-events"),
         metric("Cloudflare API", state.health.bindings.cloudflareApi ? "Runtime secret present" : "OAuth/token needed")
       ].join("");
       await loadProjects();
@@ -3280,22 +3748,80 @@ function renderAgentAppHtml(): string {
       input.value = "";
       addMessage("user", message);
       const button = event.currentTarget.querySelector("button");
+      const stopButton = $("chat-stop");
+      const controller = new AbortController();
+      const agentMessage = addMessage("agent", "", { streaming: true });
+      let streamedText = "";
+      let refreshThreads = false;
+      state.chatAbortController = controller;
       button.disabled = true;
+      stopButton.disabled = false;
+      setChatStatus("streaming", "Thinking");
       try {
-        const data = await jsonFetch("/chat", {
+        const response = await fetch("/chat?stream=1", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message, projectId: state.projectId, threadId: state.threadId })
+          headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+          body: JSON.stringify({ message, projectId: state.projectId, threadId: state.threadId, stream: true }),
+          signal: controller.signal
         });
-        if (data.projectId) state.projectId = data.projectId;
-        if (data.threadId) state.threadId = data.threadId;
-        addMessage("agent", typeof data.output === "string" ? data.output : JSON.stringify(data.output, null, 2));
-        await loadThreads();
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || "Chat request failed");
+        }
+        const contentType = response.headers.get("content-type") || "";
+        if (!contentType.includes("text/event-stream")) {
+          const data = await response.json();
+          streamedText = typeof data.output === "string" ? data.output : JSON.stringify(data.output, null, 2);
+          updateMessage(agentMessage, streamedText);
+          if (data.projectId) state.projectId = data.projectId;
+          if (data.threadId) state.threadId = data.threadId;
+          refreshThreads = true;
+        } else {
+          await readEventStream(response, (name, data) => {
+            if (name === "status") {
+              setChatStatus("streaming", data.status || "Working");
+            }
+            if (name === "metadata") {
+              if (data.projectId) state.projectId = data.projectId;
+              if (data.threadId) state.threadId = data.threadId;
+              setChatStatus("streaming", (data.modelProvider || "model") + " / " + (data.model || "stream"));
+            }
+            if (name === "delta") {
+              streamedText += String(data.content || "");
+              updateMessage(agentMessage, streamedText);
+            }
+            if (name === "done") {
+              if (data.projectId) state.projectId = data.projectId;
+              if (data.threadId) state.threadId = data.threadId;
+              if (typeof data.output === "string" && !streamedText) {
+                streamedText = data.output;
+                updateMessage(agentMessage, streamedText);
+              }
+              setChatStatus("idle", "Complete");
+            }
+            if (name === "error") {
+              throw new Error(data.error || "Chat stream failed");
+            }
+          });
+          refreshThreads = true;
+        }
+        agentMessage.dataset.streaming = "false";
+        setChatStatus("idle", "Idle");
       } catch (error) {
-        addMessage("agent", error.message);
+        agentMessage.dataset.streaming = "false";
+        const stopped = error?.name === "AbortError";
+        updateMessage(agentMessage, stopped ? "Stopped." : (error?.message || "Chat request failed."));
+        setChatStatus(stopped ? "idle" : "error", stopped ? "Stopped" : "Error");
       } finally {
+        state.chatAbortController = null;
+        if (refreshThreads) await loadThreads();
         button.disabled = false;
+        stopButton.disabled = true;
       }
+    });
+
+    $("chat-stop").addEventListener("click", () => {
+      if (state.chatAbortController) state.chatAbortController.abort();
     });
 
     $("memory-form").addEventListener("submit", async (event) => {

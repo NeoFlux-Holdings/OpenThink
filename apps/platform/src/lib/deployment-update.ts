@@ -1,5 +1,14 @@
 import type { AutoSyncConfig, SyncAction, SyncResult, SyncStatus } from "@open-think/sync";
 import { renderAgentWorkerModule } from "./agent-worker-template";
+import {
+  normalizePersonalAgentConfig,
+  normalizePersonalAgentToolApprovalPolicy,
+  personalAgentPublicConfigBindingText,
+  personalAgentSetupSql,
+  publicPersonalAgentConfig,
+  type NormalizedPersonalAgentSubsystemConfig,
+  type PersonalAgentSubsystemConfig
+} from "./personal-agent-options";
 import { CloudflareApiClient } from "./cloudflare-api";
 import type { DeploymentRecord, DeploymentRepository } from "./d1";
 import type { DeploymentRequest } from "./deployment-engine";
@@ -16,6 +25,7 @@ export type DeploymentResetMode = "source" | "factory-settings";
 export interface DeploymentResetRequest {
   mode: DeploymentResetMode;
   confirmation: string;
+  personalAgent?: PersonalAgentSubsystemConfig;
 }
 
 export type DeploymentUpdateCredentialSource =
@@ -115,6 +125,7 @@ export interface DeploymentUpdateSummary {
   canUpdateWithoutToken: boolean;
   credentialSource: DeploymentUpdateCredentialSource;
   tokenFingerprint?: string;
+  personalAgent?: ReturnType<typeof publicPersonalAgentConfig>;
   workspace: DeploymentWorkspaceCapabilityPlan;
   warnings: string[];
 }
@@ -150,6 +161,9 @@ export function summarizeDeploymentUpdate(
   const metadata = readDeploymentUpdateMetadata(deployment.resourcePlan);
   const credential = resolveDeploymentUpdateCredential(env);
   const workspace = buildWorkspaceCapabilityPlan(deployment.resourcePlan, env, metadata);
+  const personalAgent = publicPersonalAgentConfig(
+    readPersonalAgentConfig(deployment.resourcePlan, env)
+  );
   const warnings: string[] = [];
 
   if (!target) {
@@ -173,6 +187,7 @@ export function summarizeDeploymentUpdate(
 
   if (target) summary.target = target;
   if (metadata) summary.metadata = metadata;
+  if (personalAgent.enabled) summary.personalAgent = personalAgent;
   if (deployment.authorization?.tokenFingerprint) {
     summary.tokenFingerprint = deployment.authorization.tokenFingerprint;
   }
@@ -237,7 +252,7 @@ export async function runDeploymentUpdate(input: {
     });
     const basePlan =
       resetResult.mode === "factory-settings"
-        ? factoryResetResourcePlan(input.deployment.resourcePlan)
+        ? factoryResetResourcePlan(input.deployment.resourcePlan, resetResult.personalAgent)
         : input.deployment.resourcePlan;
     const resourcePlan = resetResult.workspace
       ? withDeploymentWorkspaceMetadata(
@@ -642,6 +657,7 @@ async function resetDeploymentFromGithub(input: {
   workspace?: DeploymentWorkspaceMetadata | undefined;
   autoUpdate: AutoSyncConfig;
   mode: DeploymentResetMode;
+  personalAgent?: NormalizedPersonalAgentSubsystemConfig;
 }> {
   if (!input.credential.apiToken) {
     throw new DeploymentUpdateError(
@@ -659,6 +675,9 @@ async function resetDeploymentFromGithub(input: {
 
   const mode = reset.mode;
   const factory = mode === "factory-settings";
+  const personalAgent = factory && reset.personalAgent
+    ? normalizePersonalAgentConfig(reset.personalAgent)
+    : undefined;
   const autoUpdate = factory ? { ...defaultAutoUpdate } : input.autoUpdate;
   const sourceSha = input.github.remoteHead ?? readEnvString(input.env, "OPEN_THINK_SOURCE_SHA");
   const workspace = factory
@@ -668,14 +687,19 @@ async function resetDeploymentFromGithub(input: {
     accountId: input.target.accountId,
     apiToken: input.credential.apiToken
   });
+  const requestOptions: {
+    factoryDefaults: boolean;
+    personalAgentOverride?: NormalizedPersonalAgentSubsystemConfig;
+  } = {
+    factoryDefaults: factory
+  };
+  if (personalAgent) requestOptions.personalAgentOverride = personalAgent;
 
   await client.uploadWorkerModule({
     scriptName: input.target.scriptName,
     moduleName: "worker.js",
     moduleCode: renderAgentWorkerModule({
-      request: deploymentRequestFromRecord(input.deployment, input.target, input.env, {
-        factoryDefaults: factory
-      }),
+      request: deploymentRequestFromRecord(input.deployment, input.target, input.env, requestOptions),
       deploymentId: input.deployment.id,
       scriptName: input.target.scriptName
     }),
@@ -687,9 +711,19 @@ async function resetDeploymentFromGithub(input: {
       sourceSha,
       workspace,
       undefined,
-      factory
+      factory,
+      personalAgent
     )
   });
+
+  if (personalAgent?.enabled) {
+    const d1Database = readRecord(input.deployment.resourcePlan.d1Database);
+    const databaseId = readString(d1Database?.id);
+    const setupSql = personalAgentSetupSql(personalAgent, input.deployment.id);
+    if (databaseId && setupSql) {
+      await client.executeD1Sql(databaseId, setupSql);
+    }
+  }
 
   const now = new Date().toISOString();
   const status = githubSyncStatus({
@@ -702,13 +736,16 @@ async function resetDeploymentFromGithub(input: {
 
   return {
     mode,
+    ...(personalAgent ? { personalAgent } : {}),
     ...(workspace ? { workspace } : {}),
     autoUpdate,
     result: {
       action: "reconcile",
       status,
       message:
-        mode === "factory-settings"
+        mode === "factory-settings" && personalAgent?.enabled
+          ? `Factory reset ${input.target.scriptName} to the OpenThink GitHub upstream and re-seeded the personal agent as ${personalAgent.label}. Canonical D1/R2/Queue/Vectorize/AI bindings were restored, custom non-secret bindings and workspace metadata were removed, and encrypted Worker secrets were preserved.`
+          : mode === "factory-settings"
           ? `Factory reset ${input.target.scriptName} to the OpenThink GitHub upstream. Canonical D1/R2/Queue/Vectorize/AI bindings were restored, custom non-secret bindings and workspace metadata were removed, and encrypted Worker secrets were preserved.`
           : `Restored ${input.target.scriptName} from the OpenThink GitHub upstream while preserving current workspace metadata and encrypted Worker secrets.`,
       ...(input.github.remoteHead ? { commitSha: input.github.remoteHead } : {}),
@@ -761,9 +798,15 @@ function deploymentRequestFromRecord(
   deployment: DeploymentRecord,
   target: DeploymentUpdateTarget,
   env: Record<string, unknown>,
-  options: { factoryDefaults?: boolean } = {}
+  options: {
+    factoryDefaults?: boolean;
+    personalAgentOverride?: PersonalAgentSubsystemConfig | NormalizedPersonalAgentSubsystemConfig;
+  } = {}
 ): DeploymentRequest {
   const runtime = readRuntimeConfig(deployment.resourcePlan, env, options.factoryDefaults);
+  const personalAgent = options.personalAgentOverride
+    ? normalizePersonalAgentConfig(options.personalAgentOverride)
+    : readPersonalAgentConfig(deployment.resourcePlan, env, options.factoryDefaults);
   const request: DeploymentRequest = {
     flow: deployment.flow,
     starterTemplate: deployment.starterTemplate,
@@ -775,6 +818,7 @@ function deploymentRequestFromRecord(
     modelProvider: runtime.modelProvider,
     thinkingLevel: runtime.thinkingLevel
   };
+  if (personalAgent.enabled) request.personalAgent = personalAgent;
   return request;
 }
 
@@ -987,10 +1031,14 @@ function readWorkspaceStatus(value: unknown): "not-configured" | "ready-to-add" 
 
 function normalizeResetRequest(reset: DeploymentResetRequest | undefined): DeploymentResetRequest {
   const mode = reset?.mode === "factory-settings" ? reset.mode : "source";
-  return {
+  const normalized: DeploymentResetRequest = {
     mode,
     confirmation: reset?.confirmation?.trim() ?? ""
   };
+  if (mode === "factory-settings" && reset?.personalAgent) {
+    normalized.personalAgent = reset.personalAgent;
+  }
+  return normalized;
 }
 
 function assertResetConfirmation(input: {
@@ -1011,15 +1059,22 @@ function resetConfirmationPhrase(deploymentId: string): string {
   return `RESET ${deploymentId}`;
 }
 
-function factoryResetResourcePlan(resourcePlan: Record<string, unknown>): Record<string, unknown> {
+function factoryResetResourcePlan(
+  resourcePlan: Record<string, unknown>,
+  personalAgent?: NormalizedPersonalAgentSubsystemConfig
+): Record<string, unknown> {
   const next = { ...resourcePlan };
   delete next.openThinkWorkspace;
+  delete next.openThinkPersonalAgent;
   delete next.generatedRuntime;
   next.openThinkRuntime = {
     defaultModel: "@cf/moonshotai/kimi-k2.6",
     modelProvider: "workers-ai",
     thinkingLevel: "medium"
   };
+  if (personalAgent?.enabled) {
+    next.openThinkPersonalAgent = publicPersonalAgentConfig(personalAgent);
+  }
   return next;
 }
 
@@ -1120,7 +1175,8 @@ function buildWorkerUploadMetadata(
   sourceSha?: string,
   workspace?: DeploymentWorkspaceMetadata,
   artifactToken?: string,
-  factoryDefaults = false
+  factoryDefaults = false,
+  personalAgentOverride?: PersonalAgentSubsystemConfig | NormalizedPersonalAgentSubsystemConfig
 ): {
   main_module: string;
   compatibility_date: string;
@@ -1135,6 +1191,9 @@ function buildWorkerUploadMetadata(
   const queue = readRecord(resourcePlan.queue);
   const vectorizeIndex = readRecord(resourcePlan.vectorizeIndex);
   const runtime = readRuntimeConfig(resourcePlan, env, factoryDefaults);
+  const personalAgent = personalAgentOverride
+    ? normalizePersonalAgentConfig(personalAgentOverride)
+    : readPersonalAgentConfig(resourcePlan, env, factoryDefaults);
   const updateRepository =
     readEnvString(env, "OPEN_THINK_UPDATE_REPOSITORY") ?? "NeoFlux-Holdings/OpenThink";
   const updateBranch = readEnvString(env, "OPEN_THINK_UPDATE_BRANCH") ?? "main";
@@ -1178,6 +1237,20 @@ function buildWorkerUploadMetadata(
       type: "plain_text",
       name: "OPEN_THINK_THINKING_LEVEL",
       text: runtime.thinkingLevel
+    },
+    ...(personalAgent.enabled
+      ? [
+          {
+            type: "plain_text",
+            name: "OPEN_THINK_PERSONAL_AGENT_CONFIG",
+            text: personalAgentPublicConfigBindingText(personalAgent)
+          }
+        ]
+      : []),
+    {
+      type: "plain_text",
+      name: "OPEN_THINK_TOOL_APPROVAL_POLICY",
+      text: personalAgent.toolApprovalPolicy
     },
     {
       type: "plain_text",
@@ -1227,6 +1300,20 @@ function buildWorkerUploadMetadata(
       type: "secret_text",
       name: "OPEN_THINK_CF_API_TOKEN",
       text: agentCloudflareApiToken
+    });
+  }
+  if (personalAgent.soulPrompt) {
+    bindings.push({
+      type: "secret_text",
+      name: "OPEN_THINK_SOUL_PROMPT",
+      text: personalAgent.soulPrompt
+    });
+  }
+  if (personalAgent.launchBrief) {
+    bindings.push({
+      type: "secret_text",
+      name: "OPEN_THINK_LAUNCH_BRIEF",
+      text: personalAgent.launchBrief
     });
   }
   if (sourceSha) {
@@ -1376,6 +1463,35 @@ function readRuntimeConfig(
   };
 }
 
+function readPersonalAgentConfig(
+  resourcePlan: Record<string, unknown>,
+  env: Record<string, unknown>,
+  factoryDefaults = false
+): NormalizedPersonalAgentSubsystemConfig {
+  if (factoryDefaults) {
+    return normalizePersonalAgentConfig(undefined);
+  }
+
+  const envConfig = parseJsonRecord(readEnvString(env, "OPEN_THINK_PERSONAL_AGENT_CONFIG"));
+  const envToolApprovalPolicy = readEnvString(env, "OPEN_THINK_TOOL_APPROVAL_POLICY");
+  if (envConfig) {
+    return normalizePersonalAgentConfig({
+      ...(envConfig as PersonalAgentSubsystemConfig),
+      ...(envToolApprovalPolicy
+        ? { toolApprovalPolicy: normalizePersonalAgentToolApprovalPolicy(envToolApprovalPolicy) }
+        : {})
+    });
+  }
+
+  const resourceConfig = readRecord(resourcePlan.openThinkPersonalAgent);
+  return normalizePersonalAgentConfig({
+    ...((resourceConfig as PersonalAgentSubsystemConfig | undefined) ?? {}),
+    ...(envToolApprovalPolicy
+      ? { toolApprovalPolicy: normalizePersonalAgentToolApprovalPolicy(envToolApprovalPolicy) }
+      : {})
+  });
+}
+
 function normalizeModelProvider(
   value: string
 ): "workers-ai" | "openrouter" | "anthropic" | "openai" {
@@ -1402,6 +1518,16 @@ function normalizeThinkingLevel(value: string): "low" | "medium" | "high" | "xhi
     return value;
   }
   return "medium";
+}
+
+function parseJsonRecord(value: string | undefined): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return readRecord(parsed);
+  } catch {
+    return undefined;
+  }
 }
 
 function artifactRepoName(scriptName: string): string {

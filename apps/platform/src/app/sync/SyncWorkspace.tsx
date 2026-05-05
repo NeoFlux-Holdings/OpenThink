@@ -18,10 +18,17 @@ import {
 } from "lucide-react";
 import type { AutoSyncConfig, SyncAction, SyncResult, SyncStatus } from "@open-think/sync";
 import type {
+  DeploymentResetRequest,
   DeploymentResetMode,
   DeploymentUpdateAction,
   DeploymentUpdateSummary
 } from "@/lib/deployment-update";
+import {
+  PersonalAgentConfigurator,
+  createPersonalAgentConfiguratorState,
+  personalAgentConfigFromConfiguratorState,
+  personalAgentConfiguratorIssue
+} from "@/app/deploy/_components/PersonalAgentConfigurator";
 
 const manualActions: Array<{
   action: SyncAction;
@@ -71,6 +78,10 @@ export function SyncWorkspace() {
   const [updateToken, setUpdateToken] = useState("");
   const [resetMode, setResetMode] = useState<DeploymentResetMode>("source");
   const [resetConfirmation, setResetConfirmation] = useState("");
+  const [resetReconfigurePersonalAgent, setResetReconfigurePersonalAgent] = useState(false);
+  const [resetPersonalAgentConfig, setResetPersonalAgentConfig] = useState(() =>
+    createPersonalAgentConfiguratorState()
+  );
   const [tokenStatus, setTokenStatus] = useState<TokenStatus>({
     state: "empty",
     message: "Paste a Cloudflare API token to unlock updates for deployed agents."
@@ -106,12 +117,24 @@ export function SyncWorkspace() {
     direction: "bidirectional" as const,
     intervalSeconds: 300
   };
+  const currentPersonalAgent = selectedDeployment?.personalAgent;
+  const resetPersonalAgentIssue =
+    resetMode === "factory-settings" && resetReconfigurePersonalAgent
+      ? personalAgentConfiguratorIssue(
+          resetPersonalAgentConfig,
+          "Custom .brain reset setup needs a stack name or a soul prompt."
+        )
+      : null;
   const resetPhrase = selectedDeployment ? `RESET ${selectedDeployment.deploymentId}` : "RESET";
-  const resetReady = Boolean(selectedDeployment && resetConfirmation.trim() === resetPhrase);
+  const resetReady = Boolean(
+    selectedDeployment && resetConfirmation.trim() === resetPhrase && !resetPersonalAgentIssue
+  );
 
   useEffect(() => {
     setResetConfirmation("");
     setResetMode("source");
+    setResetReconfigurePersonalAgent(false);
+    setResetPersonalAgentConfig(createPersonalAgentConfiguratorState());
   }, [selectedDeploymentId]);
 
   useEffect(() => {
@@ -338,7 +361,7 @@ export function SyncWorkspace() {
   async function runDeploymentUpdate(
     action: DeploymentUpdateAction,
     autoUpdate?: Partial<AutoSyncConfig>,
-    reset?: { mode: DeploymentResetMode; confirmation: string }
+    reset?: DeploymentResetRequest
   ) {
     if (!selectedDeployment) return;
     if (!selectedDeployment.canUpdateWithoutToken && !updateToken.trim()) {
@@ -386,6 +409,12 @@ export function SyncWorkspace() {
     } finally {
       setIsDeploymentWorking(null);
     }
+  }
+
+  function buildResetPersonalAgentConfig(): NonNullable<DeploymentResetRequest["personalAgent"]> {
+    return personalAgentConfigFromConfiguratorState(resetPersonalAgentConfig, {
+      enabled: true
+    });
   }
 
   return (
@@ -656,9 +685,49 @@ export function SyncWorkspace() {
                     <p>
                       Restore this Worker from GitHub, or remove custom non-secret settings and
                       return to the baseline OpenThink runtime. Encrypted Worker secrets are
-                      preserved.
+                      preserved; factory reset can also re-seed a new brain.
                     </p>
                   </div>
+                </div>
+                <div className="current-brain-summary">
+                  <div className="current-brain-summary-top">
+                    <span>
+                      <strong>
+                        {currentPersonalAgent?.enabled
+                          ? currentPersonalAgent.label
+                          : "Baseline OpenThink runtime"}
+                      </strong>
+                      <small>
+                        {currentPersonalAgent?.enabled
+                          ? `${currentPersonalAgent.brain} on ${currentPersonalAgent.stack}`
+                          : "No personal-agent brain/stack profile is currently configured."}
+                      </small>
+                    </span>
+                    <span data-state={currentPersonalAgent?.enabled ? "configured" : "empty"}>
+                      {currentPersonalAgent?.enabled ? "Configured" : "Not configured"}
+                    </span>
+                  </div>
+                  {currentPersonalAgent?.enabled ? (
+                    <div className="current-brain-badges">
+                      <span>{currentPersonalAgent.setupStatus.replace(/-/g, " ")}</span>
+                      <span>{(currentPersonalAgent.toolApprovalPolicy ?? "auto").replace(/-/g, " ")}</span>
+                      <span>{currentPersonalAgent.enabledFeatures.length} features</span>
+                      <span>
+                        {currentPersonalAgent.soulPromptConfigured
+                          ? "Soul prompt set"
+                          : "No soul prompt"}
+                      </span>
+                      <span>
+                        {currentPersonalAgent.launchBriefConfigured
+                          ? "Launch brief set"
+                          : "No launch brief"}
+                      </span>
+                    </div>
+                  ) : null}
+                  <p>
+                    Source restore preserves this profile. Factory reset clears it unless re-setup
+                    is enabled below.
+                  </p>
                 </div>
                 <div className="form-grid reset-grid">
                   <div className="field">
@@ -675,8 +744,8 @@ export function SyncWorkspace() {
                     </select>
                     <span className="field-hint">
                       {resetMode === "source"
-                        ? "Reuploads the generated Worker from upstream and keeps current workspace metadata."
-                        : "Reuploads upstream source, disables auto updates, removes workspace metadata, and drops custom non-secret bindings."}
+                        ? "Reuploads the generated Worker from upstream and keeps current workspace and brain metadata."
+                        : "Reuploads upstream source, disables auto updates, removes workspace metadata, and drops custom non-secret bindings unless re-setup is enabled."}
                     </span>
                   </div>
                   <div className="field">
@@ -694,16 +763,65 @@ export function SyncWorkspace() {
                     </span>
                   </div>
                 </div>
+                {resetMode === "factory-settings" ? (
+                  <div className="reset-personal-agent">
+                    <label className="check-row reset-agent-toggle">
+                      <input
+                        type="checkbox"
+                        checked={resetReconfigurePersonalAgent}
+                        onChange={(event) =>
+                          setResetReconfigurePersonalAgent(event.target.checked)
+                        }
+                      />
+                      <span>
+                        <strong>Re-setup personal agent brain after reset</strong>
+                        <small>
+                          Factory reset clears the stored brain/stack config unless this is on.
+                          Source restore keeps the current brain.
+                        </small>
+                      </span>
+                    </label>
+
+                    {resetReconfigurePersonalAgent ? (
+                      <>
+                        <PersonalAgentConfigurator
+                          state={resetPersonalAgentConfig}
+                          onChange={setResetPersonalAgentConfig}
+                          idPrefix="reset-personal-agent"
+                          presetInput="select"
+                          presetLabel="New brain/stack preset"
+                          presetHint="The reset uploads this config, writes the public runtime binding, and re-runs the setup bootstrap when D1 is available."
+                          featureSummaryLimit="all"
+                          summaryClassName="reset-agent-summary"
+                          customNameLabel="Custom stack name"
+                          soulPromptLabel="Soul prompt"
+                          launchBriefLabel="Launch brief"
+                          soulPromptHint="Stored as a Worker secret when provided and redacted from public status."
+                          launchBriefHint="Stored separately from the soul prompt and seeded into D1 memory during setup."
+                          externalEndpointHint="Optional. If blank, the agent records the external bridge as a setup follow-up."
+                          advancedHint="Choose exactly which personal-agent features stay on."
+                        />
+                        {resetPersonalAgentIssue ? (
+                          <p className="notice">{resetPersonalAgentIssue}</p>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </div>
+                ) : null}
                 <button
                   className="button button-danger"
                   type="button"
                   disabled={!resetReady || isDeploymentWorking !== null}
-                  onClick={() =>
-                    void runDeploymentUpdate("reset", undefined, {
+                  onClick={() => {
+                    const reset: DeploymentResetRequest = {
                       mode: resetMode,
                       confirmation: resetConfirmation.trim()
-                    })
-                  }
+                    };
+                    if (resetMode === "factory-settings" && resetReconfigurePersonalAgent) {
+                      reset.personalAgent = buildResetPersonalAgentConfig();
+                    }
+                    void runDeploymentUpdate("reset", undefined, reset);
+                  }}
                 >
                   <RotateCcw size={16} aria-hidden="true" />
                   {isDeploymentWorking === "reset" ? "Resetting" : "Run reset"}

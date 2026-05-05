@@ -7,6 +7,12 @@ import {
   inspectCloudflareToken,
   provisioningAdapterFromEnv
 } from "./cloudflare-api";
+import {
+  isPersonalAgentFeatureKey,
+  isPersonalAgentPresetId,
+  isPersonalAgentToolApprovalPolicy,
+  type PersonalAgentSubsystemConfig
+} from "./personal-agent-options";
 import type { DeploymentRepository } from "./d1";
 import {
   assertAutomationEnvironment,
@@ -38,6 +44,7 @@ export interface DeploymentRequest {
     anthropicApiKey?: string;
     openAiApiKey?: string;
   };
+  personalAgent?: PersonalAgentSubsystemConfig;
   customDomain?: {
     enabled?: boolean;
     hostname?: string;
@@ -260,6 +267,8 @@ export class DeploymentEngine {
       throw new DeploymentValidationError("Unsupported thinking level.");
     }
 
+    this.validatePersonalAgentConfig(request.personalAgent);
+
     if (request.accessAllowedEmail && !isEmailLike(request.accessAllowedEmail)) {
       throw new DeploymentValidationError("A valid Cloudflare Access login email is required.");
     }
@@ -296,6 +305,44 @@ export class DeploymentEngine {
       throw new DeploymentValidationError("Partner flow requires a partner account id.");
     }
   }
+
+  private validatePersonalAgentConfig(config: PersonalAgentSubsystemConfig | undefined): void {
+    if (!config) return;
+
+    if (config.presetId && !isPersonalAgentPresetId(config.presetId)) {
+      throw new DeploymentValidationError("Unsupported personal agent brain/stack preset.");
+    }
+
+    if (config.toolApprovalPolicy && !isPersonalAgentToolApprovalPolicy(config.toolApprovalPolicy)) {
+      throw new DeploymentValidationError("Unsupported MCP tool approval policy.");
+    }
+
+    if (config.soulPrompt && config.soulPrompt.length > 8000) {
+      throw new DeploymentValidationError("Personal agent soul prompt must be 8,000 characters or less.");
+    }
+
+    if (config.launchBrief && config.launchBrief.length > 12000) {
+      throw new DeploymentValidationError("Personal agent launch brief must be 12,000 characters or less.");
+    }
+
+    if (config.customName && config.customName.length > 80) {
+      throw new DeploymentValidationError("Custom personal agent stack name must be 80 characters or less.");
+    }
+
+    if (config.externalEndpoint && config.externalEndpoint.length > 500) {
+      throw new DeploymentValidationError("Personal agent external endpoint must be 500 characters or less.");
+    }
+
+    for (const key of Object.keys(config.features ?? {})) {
+      if (!isPersonalAgentFeatureKey(key)) {
+        throw new DeploymentValidationError(`Unsupported personal agent feature: ${key}.`);
+      }
+    }
+
+    if (config.enabled !== false && config.presetId === "custom" && !config.customName?.trim() && !config.soulPrompt?.trim()) {
+      throw new DeploymentValidationError("Custom personal agent setup requires a stack name or soul prompt.");
+    }
+  }
 }
 
 export function buildDeploymentRequest(
@@ -316,6 +363,7 @@ export function buildDeploymentRequest(
   if (input.modelProvider) request.modelProvider = input.modelProvider;
   if (input.thinkingLevel) request.thinkingLevel = input.thinkingLevel;
   if (input.providerKeys) request.providerKeys = input.providerKeys;
+  if (input.personalAgent) request.personalAgent = input.personalAgent;
   if (input.customDomain) request.customDomain = input.customDomain;
   if (input.stripeSessionId) request.stripeSessionId = input.stripeSessionId;
   if (input.githubOAuthToken) request.githubOAuthToken = input.githubOAuthToken;

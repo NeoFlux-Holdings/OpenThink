@@ -130,6 +130,68 @@ describe("deployment updates", () => {
     ).rejects.toThrow('Reset requires typing "RESET agent-test"');
   });
 
+  it("source reset preserves the current personal agent prompt flags", async () => {
+    let uploadedMetadata: Record<string, unknown> | undefined;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const target = String(url);
+        if (target.includes("api.github.com/repos/NeoFlux-Holdings/OpenThink/commits/main")) {
+          return new Response(JSON.stringify({ sha: "abc123456789" }), {
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (target.includes("/accounts/acct/workers/scripts/open-think-agent")) {
+          uploadedMetadata = JSON.parse(String((init?.body as FormData).get("metadata")));
+          return json({ result: {} });
+        }
+        return json({ result: {} });
+      }) as unknown as typeof fetch
+    );
+
+    await runDeploymentUpdate({
+      deployment: deploymentRecord({
+        resourcePlan: {
+          openThinkPersonalAgent: {
+            enabled: true,
+            presetId: "custom",
+            customName: "Current Brain",
+            toolApprovalPolicy: "ask-every-time",
+            soulPromptConfigured: true,
+            launchBriefConfigured: true
+          }
+        }
+      }),
+      action: "reset",
+      env: {},
+      cfApiToken: "cf-token",
+      reset: {
+        mode: "source",
+        confirmation: "RESET agent-test"
+      }
+    });
+
+    const bindings = uploadedMetadata?.bindings as Array<Record<string, unknown>>;
+    const publicConfig = bindings.find(
+      (binding) => binding.name === "OPEN_THINK_PERSONAL_AGENT_CONFIG"
+    );
+    expect(JSON.parse(String(publicConfig?.text))).toMatchObject({
+      label: "Current Brain",
+      toolApprovalPolicy: "ask-every-time",
+      soulPromptConfigured: true,
+      launchBriefConfigured: true
+    });
+    expect(bindings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "OPEN_THINK_TOOL_APPROVAL_POLICY",
+          text: "ask-every-time"
+        })
+      ])
+    );
+  });
+
   it("factory resets custom workspace metadata while preserving secrets", async () => {
     let uploadedMetadata: Record<string, unknown> | undefined;
 
@@ -204,6 +266,115 @@ describe("deployment updates", () => {
         expect.objectContaining({
           name: "OPEN_THINK_DEFAULT_MODEL",
           text: "@cf/moonshotai/kimi-k2.6"
+        })
+      ])
+    );
+  });
+
+  it("can factory reset and re-setup a new personal agent brain", async () => {
+    let uploadedMetadata: Record<string, unknown> | undefined;
+    let d1Batch: Array<{ sql: string }> | undefined;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const target = String(url);
+        if (target.includes("api.github.com/repos/NeoFlux-Holdings/OpenThink/commits/main")) {
+          return new Response(JSON.stringify({ sha: "abc123456789" }), {
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (target.includes("/accounts/acct/d1/database/d1-id/query")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            batch?: Array<{ sql: string }>;
+          };
+          d1Batch = body.batch;
+          return json({ result: [] });
+        }
+        if (target.includes("/accounts/acct/workers/scripts/open-think-agent")) {
+          uploadedMetadata = JSON.parse(String((init?.body as FormData).get("metadata")));
+          return json({ result: {} });
+        }
+        return json({ result: {} });
+      }) as unknown as typeof fetch
+    );
+
+    const result = await runDeploymentUpdate({
+      deployment: deploymentRecord({
+        resourcePlan: {
+          d1Database: { id: "d1-id" },
+          openThinkPersonalAgent: {
+            enabled: true,
+            presetId: "openthink-gbrain-gstack",
+            label: "Old Brain",
+            soulPromptConfigured: true
+          }
+        }
+      }),
+      action: "reset",
+      env: {},
+      cfApiToken: "cf-token",
+      reset: {
+        mode: "factory-settings",
+        confirmation: "RESET agent-test",
+        personalAgent: {
+          enabled: true,
+          presetId: "custom",
+          customName: "Reset Brain",
+          toolApprovalPolicy: "allow-all",
+          soulPrompt: "Keep the long-term identity stable.",
+          launchBrief: "Start by rebuilding the personal knowledge base.",
+          features: {
+            knowledgeGraph: true,
+            browserAutomation: false
+          }
+        }
+      }
+    });
+
+    expect(result.resourcePlan.openThinkPersonalAgent).toMatchObject({
+      enabled: true,
+      label: "Reset Brain",
+      toolApprovalPolicy: "allow-all",
+      soulPromptConfigured: true,
+      launchBriefConfigured: true
+    });
+
+    const bindings = uploadedMetadata?.bindings as Array<Record<string, unknown>>;
+    const publicConfig = bindings.find(
+      (binding) => binding.name === "OPEN_THINK_PERSONAL_AGENT_CONFIG"
+    );
+    expect(JSON.parse(String(publicConfig?.text))).toMatchObject({
+      label: "Reset Brain",
+      toolApprovalPolicy: "allow-all",
+      soulPromptConfigured: true,
+      launchBriefConfigured: true
+    });
+    expect(String(publicConfig?.text)).not.toContain("Keep the long-term identity stable.");
+    expect(String(publicConfig?.text)).not.toContain("rebuilding the personal knowledge base");
+    expect(bindings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "plain_text",
+          name: "OPEN_THINK_TOOL_APPROVAL_POLICY",
+          text: "allow-all"
+        }),
+        expect.objectContaining({
+          type: "secret_text",
+          name: "OPEN_THINK_SOUL_PROMPT",
+          text: "Keep the long-term identity stable."
+        }),
+        expect.objectContaining({
+          type: "secret_text",
+          name: "OPEN_THINK_LAUNCH_BRIEF",
+          text: "Start by rebuilding the personal knowledge base."
+        })
+      ])
+    );
+    expect(d1Batch).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sql: expect.stringContaining("setup:agent-test:launch-brief")
         })
       ])
     );

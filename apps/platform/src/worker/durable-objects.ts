@@ -5,6 +5,7 @@ import { generateAgentReply } from "@/lib/model-router";
 interface DurableObjectStorageLike {
   get<T = unknown>(key: string): Promise<T | undefined>;
   put<T = unknown>(key: string, value: T): Promise<void>;
+  delete(key: string): Promise<void>;
   list<T = unknown>(options?: { prefix?: string }): Promise<Map<string, T>>;
 }
 
@@ -31,6 +32,10 @@ interface WorkerEnv {
   AI_GATEWAY_API_KEY?: string;
 }
 
+interface ChatResponsePayload {
+  message: AgentMessage;
+}
+
 export class ChatDO {
   constructor(
     private readonly ctx: DurableObjectContextLike,
@@ -54,32 +59,103 @@ export class ChatDO {
         return Response.json({ error: "Message is required." }, { status: 400 });
       }
 
-      const userMessage = await this.append(conversationId, {
-        role: "user",
-        content,
-        metadata: {
-          userId: payload.userId ?? "unknown"
-        }
-      });
-      const replyInput: Parameters<typeof generateAgentReply>[0] = {
-        userId: payload.userId ?? "unknown",
-        message: content,
-        env: this.env as unknown as Record<string, unknown>
-      };
-      if (this.env.AI) replyInput.workersAI = this.env.AI;
-      const reply = await generateAgentReply(replyInput);
-      const assistantMessage = await this.append(conversationId, {
-        role: "assistant",
-        content: reply,
-        metadata: {
-          userMessageId: userMessage.id
-        }
-      });
+      const wantsStream =
+        url.searchParams.get("stream") === "1" ||
+        request.headers.get("accept")?.toLowerCase().includes("text/event-stream") === true;
 
-      return Response.json({ message: assistantMessage });
+      if (wantsStream) {
+        return this.streamChatResponse(conversationId, content, payload.userId ?? "unknown");
+      }
+
+      return Response.json(
+        await this.createChatResponse(conversationId, content, payload.userId ?? "unknown")
+      );
+    }
+
+    if (request.method === "DELETE") {
+      await this.clearMessages(conversationId);
+      return Response.json({ ok: true });
     }
 
     return Response.json({ error: "Method not allowed." }, { status: 405 });
+  }
+
+  private async createChatResponse(
+    conversationId: string,
+    content: string,
+    userId: string
+  ): Promise<ChatResponsePayload> {
+    const userMessage = await this.append(conversationId, {
+      role: "user",
+      content,
+      metadata: {
+        userId
+      }
+    });
+    const replyInput: Parameters<typeof generateAgentReply>[0] = {
+      userId,
+      message: content,
+      env: this.env as unknown as Record<string, unknown>
+    };
+    if (this.env.AI) replyInput.workersAI = this.env.AI;
+    const reply = await generateAgentReply(replyInput);
+    const assistantMessage = await this.append(conversationId, {
+      role: "assistant",
+      content: reply,
+      metadata: {
+        userMessageId: userMessage.id
+      }
+    });
+
+    return { message: assistantMessage };
+  }
+
+  private streamChatResponse(conversationId: string, content: string, userId: string): Response {
+    const encoder = new TextEncoder();
+
+    const stream = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        const send = (event: string, data: Record<string, unknown>) => {
+          controller.enqueue(
+            encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+          );
+        };
+
+        void (async () => {
+          send("status", {
+            status: "thinking",
+            conversationId
+          });
+          const payload = await this.createChatResponse(conversationId, content, userId);
+          send("message", {
+            id: payload.message.id,
+            role: payload.message.role,
+            createdAt: payload.message.createdAt
+          });
+
+          for (const chunk of textChunks(payload.message.content)) {
+            send("delta", { content: chunk });
+            await Promise.resolve();
+          }
+
+          send("done", payload as unknown as Record<string, unknown>);
+          controller.close();
+        })().catch((error: unknown) => {
+          send("error", {
+            error: error instanceof Error ? error.message : "Chat stream failed."
+          });
+          controller.close();
+        });
+      }
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive"
+      }
+    });
   }
 
   private async append(
@@ -106,6 +182,20 @@ export class ChatDO {
 
     return [...records.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
+
+  private async clearMessages(conversationId: string): Promise<void> {
+    const prefix = `conversation:${conversationId}:message:`;
+    const records = await this.ctx.storage.list<AgentMessage>({ prefix });
+    await Promise.all([...records.keys()].map((key) => this.ctx.storage.delete(key)));
+  }
+}
+
+function textChunks(text: string, size = 180): string[] {
+  const chunks: string[] = [];
+  for (let index = 0; index < text.length; index += size) {
+    chunks.push(text.slice(index, index + size));
+  }
+  return chunks.length > 0 ? chunks : [""];
 }
 
 export class TerminalDO {

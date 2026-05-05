@@ -61,7 +61,7 @@ importers:
         version: link:../../packages/ui
       '@opennextjs/cloudflare':
         specifier: latest
-        version: 1.19.5(next@16.2.4(@opentelemetry/api@1.9.0)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(wrangler@4.87.0(@cloudflare/workers-types@4.20260502.1))
+        version: 1.19.6(next@16.2.4(@opentelemetry/api@1.9.0)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(wrangler@4.87.0(@cloudflare/workers-types@4.20260502.1))
       lucide-react:
         specifier: latest
         version: 1.14.0(react@19.2.5)
@@ -176,6 +176,9 @@ importers:
 
   starters/personal-agent:
     dependencies:
+      '@ai-sdk/react':
+        specifier: ^3.0.0
+        version: 3.0.176(react@19.2.5)(zod@4.4.2)
       '@cloudflare/ai-chat':
         specifier: ^0.6.2
         version: 0.6.2(@ai-sdk/react@3.0.176(react@19.2.5)(zod@4.4.2))(agents@0.12.3)(ai@6.0.174(zod@4.4.2))(react@19.2.5)(zod@4.4.2)
@@ -206,9 +209,34 @@ importers:
       ai:
         specifier: ^6.0.174
         version: 6.0.174(zod@4.4.2)
+      react:
+        specifier: ^19.2.5
+        version: 19.2.5
+      react-dom:
+        specifier: ^19.2.5
+        version: 19.2.5(react@19.2.5)
+      streamdown:
+        specifier: ^2.5.0
+        version: 2.5.0(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
       workers-ai-provider:
         specifier: ^3.1.13
         version: 3.1.13(@ai-sdk/provider@3.0.10)(ai@6.0.174(zod@4.4.2))
+      zod:
+        specifier: ^4.4.2
+        version: 4.4.2
+    devDependencies:
+      '@types/react':
+        specifier: latest
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: latest
+        version: 19.2.3(@types/react@19.2.14)
+      vite:
+        specifier: latest
+        version: 8.0.10(@types/node@25.6.0)(esbuild@0.27.3)(terser@5.16.9)(yaml@2.8.3)
+      wrangler:
+        specifier: latest
+        version: 4.87.0(@cloudflare/workers-types@4.20260502.1)
 
   tools:
     devDependencies:
@@ -1555,8 +1583,8 @@ packages:
     peerDependencies:
       next: '>=15.5.15 <16 || >=16.2.3'
 
-  '@opennextjs/cloudflare@1.19.5':
-    resolution: {integrity: sha512-EE3RiAyxqqlKBImUFuSdK+jYgSuWvQBn0iLnh1USF0nPAGbYjmjRLmOpxNPd234yE+JerDK3GkJ787xF86lHCw==}
+  '@opennextjs/cloudflare@1.19.6':
+    resolution: {integrity: sha512-2Qd0IbcqPdsjsiaFrmACxuJHR8Pxm1JrUJIn/tFoTu+HsfFR7W921NZI50KQ5bulqg1e//Lb5TonwQlEgmSBGw==}
     hasBin: true
     peerDependencies:
       next: '>=15.5.15 <16 || >=16.2.3'
@@ -6187,7 +6215,7 @@ snapshots:
       - aws-crt
       - supports-color
 
-  '@opennextjs/cloudflare@1.19.5(next@16.2.4(@opentelemetry/api@1.9.0)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(wrangler@4.87.0(@cloudflare/workers-types@4.20260502.1))':
+  '@opennextjs/cloudflare@1.19.6(next@16.2.4(@opentelemetry/api@1.9.0)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(wrangler@4.87.0(@cloudflare/workers-types@4.20260502.1))':
     dependencies:
       '@ast-grep/napi': 0.40.5
       '@dotenvx/dotenvx': 1.31.0

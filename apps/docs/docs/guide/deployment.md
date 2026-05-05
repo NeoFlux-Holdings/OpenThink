@@ -50,6 +50,34 @@ Provisioning enables the deployed Worker's `workers.dev` route, resolves the acc
 
 Administrators can inspect recent launch records through `/api/admin/deployments`. Configure `OPEN_THINK_ADMIN_EMAILS` with comma-separated Cloudflare Access or JWT user emails in production. Local development can set `OPEN_THINK_DEV_ADMIN=true`.
 
+## Personal agent brain/stack setup
+
+The self-service setup form includes a Personal agent section. It defaults to `OpenThink gbrain + gstack`, a Cloudflare-native profile that uses D1 memory, R2 files, Queue tasks, Vectorize semantic recall, MCP tools, and runtime setup state.
+
+Users can instead choose researched presets for AIBrain, CoPaw, MemMachine, Mem0, Zep/Graphiti, Thoth, Hivemind, MemForge/A-MEM, or a custom `.brain` profile. Advanced mode lets the owner turn individual features on or off, including profile memory, episodic memory, semantic recall, knowledge graph, MCP bridge, task queue, file workspace, proactive routines, browser automation, multi-agent support, local-first routing, and health tracking.
+
+The setup also includes an MCP tool approval policy. The default is `auto`: read/search/status-style MCP tools can run directly, while writes, deletes, deploys, billing, secrets, tokens, Access, DNS, Worker, D1, R2, Queue, Vectorize, and unknown Cloudflare operations require owner approval. Owners can instead choose `ask-every-time` to approve every MCP tool call or `allow-all` to run MCP tools without approval prompts. The selected policy is stored in public personal-agent config and as the `OPEN_THINK_TOOL_APPROVAL_POLICY` Worker variable so deployment settings or factory reset can change it later without rotating secrets.
+
+The `.brain`/soul prompt and the launch brief are separate inputs. The soul prompt is durable identity and operating policy. The launch brief is initial mission context, active work, or first goals for the spawned agent. Public runtime config only records whether each value is configured.
+
+When a personal-agent profile is enabled, provisioning runs the setup bootstrap against the agent D1 database:
+
+- Creates `personal_agent_setup`.
+- Creates `personal_agent_feature_flags`.
+- Ensures the `memories` table exists.
+- Stores the selected brain/stack profile, feature toggles, setup kind, setup status, and setup steps.
+- Persists each advanced feature toggle as a first-class feature flag row.
+- Seeds a setup memory row so the first chat has durable context.
+- Seeds a separate launch-brief memory row when the owner provides initial mission context.
+- Queues a one-time `personal-agent-setup` task when the deployed runtime first sees a new setup record and `TASK_QUEUE` is bound.
+- Uploads `OPEN_THINK_PERSONAL_AGENT_CONFIG` as a plaintext Worker binding with public profile metadata.
+- Uploads `OPEN_THINK_SOUL_PROMPT` as a Worker secret when the owner provides a custom `.brain`/soul prompt.
+- Uploads `OPEN_THINK_LAUNCH_BRIEF` as a separate Worker secret when the owner provides an initial launch brief.
+
+The generated runtime also self-heals this bootstrap from `/health`, `/manifest`, `/runtime/context`, `/personal-agent/setup`, and `/chat`, so a restored Worker recreates the setup row if it is missing. External presets are marked `external-runtime-needed` until the owner provides the workstation, MCP endpoint, or external memory server credentials; the agent must not claim those external systems are connected until that follow-up is complete.
+
+During reset, source restore preserves the current personal-agent brain/stack profile. Factory reset clears the profile by default, but the reset UI can re-setup a new brain/stack in the same operation. When re-setup is enabled, the reset upload writes the new public config, stores any new soul prompt or launch brief as Worker secrets, and runs the personal-agent setup SQL again when the deployment D1 database is known.
+
 ## Deployed personal agent UI
 
 The deployed user-owned Worker serves the personal agent app at `/`. The first screen is the agent workspace, not a JSON manifest. It includes chat, runtime binding status, D1 memory, R2 file writes, Queue task submission, terminal handoff, Cloudflare control-plane status, and an advanced MCP control panel.
@@ -63,24 +91,28 @@ The MCP panel exposes:
 
 The built-in Cloudflare bridge uses the deployed Worker's `OPEN_THINK_CF_API_TOKEN` secret and `OPEN_THINK_CF_ACCOUNT_ID` variable. Generic external MCP servers use Streamable HTTP JSON-RPC. OAuth-backed MCP connections are represented in the UI and should move to the Cloudflare Agents SDK `addMcpServer()` flow when the generated deployment path is upgraded from raw Worker upload to bundled Agents SDK deployment.
 
-## Experimental Agents SDK runtime
+## Agents SDK runtime
 
-The current public deployment path still uploads a raw generated Worker module through the Workers Scripts multipart API. That path cannot directly consume npm-only runtime imports such as `@cloudflare/ai-chat`, `agents`, `ai`, or `workers-ai-provider` without adding a bundling step.
-
-An experimental package-style runtime is available for the next deployment path:
+Generated personal-agent deployments default to the package-style Cloudflare Agents SDK runtime. This is the path that handles chat streaming through `AIChatAgent`, not a hand-rolled streaming protocol:
 
 - `starters/personal-agent/src/agents-sdk.ts` exports `PersonalChatAgent extends AIChatAgent`.
 - `starters/personal-agent/wrangler.agents-sdk.jsonc` binds `PersonalChatAgent` as a SQLite Durable Object.
 - `apps/platform/src/lib/agents-sdk-runtime-template.ts` renders the same project layout for generated deployments.
+- `src/client.tsx` uses `useAgent()` and `useAgentChat()` from the official SDK packages.
+- `OPEN_THINK_RUNTIME_BUILD_ENDPOINT` points at an optional build service that installs dependencies, bundles the generated project, and uploads it to Cloudflare. Local Node deployments can build the generated Agents SDK runtime with the checked-in `starters/personal-agent` toolchain instead.
 
-The experimental runtime uses:
+The Agents SDK runtime uses:
 
 - `routeAgentRequest()` for `/agents/personal-chat-agent/<instance>` routing.
 - `AIChatAgent` and `toUIMessageStreamResponse()` for resumable WebSocket chat streaming and SQLite message persistence.
 - `addMcpServer()` and `this.mcp.getAITools()` for native MCP client connections.
+- `getUserTimezone` as a browser-side tool, `confirmCloudflareOperation` as a human approval checkpoint, and `OPEN_THINK_TOOL_APPROVAL_POLICY` to wrap MCP tools with `auto`, `ask-every-time`, or `allow-all` approval behavior.
+- Workers Assets for the deployed React chat client.
 - A `/mcp/add` Agent sub-route for adding remote MCP servers and `/mcp/state` for inspecting registered servers.
 
-To make this the default generated runtime, the provisioner needs a bundled Worker upload path, for example a temporary generated project plus `wrangler deploy`/`wrangler versions upload`, or an equivalent bundler step that resolves npm dependencies before calling the Workers Scripts API. After that, the deployed UI can move from POST `/chat` to the Agents SDK client protocol with `useAgent` and `useAgentChat`.
+If `OPEN_THINK_RUNTIME_BUILD_ENDPOINT` is missing in a local Node environment, provisioning uses `agents-sdk-local-build`: it renders the generated runtime, runs the starter Vite/Wrangler dry-run build, uploads static assets through the Workers assets upload API, and then uploads the bundled Worker module. Hosted platforms without a local build toolchain should configure `OPEN_THINK_RUNTIME_BUILD_ENDPOINT`. To intentionally use the fallback, set `OPEN_THINK_GENERATED_RUNTIME=raw-worker-module`; that runtime streams response chunks over SSE at `/chat?stream=1` and is kept for local/debug escape hatches only.
+
+Client surfaces use `useAgent()` from `agents/react` plus `useAgentChat()` from `@cloudflare/ai-chat/react` so the Agents SDK owns WebSocket connection state, resumable UI-message streaming, persisted history, tool approvals, client-side tool outputs, and clear-history behavior.
 
 ## Token automation options
 

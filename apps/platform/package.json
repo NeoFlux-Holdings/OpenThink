@@ -13,7 +13,7 @@
     "db:migrate:remote": "pnpm run provision:cf",
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
     "dev": "next dev",
-    "lint": "next lint",
+    "lint": "tsc --noEmit",
     "start": "next start",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit"

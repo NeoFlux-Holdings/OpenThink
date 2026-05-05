@@ -3,6 +3,10 @@
   "main": "src/agents-sdk.ts",
   "compatibility_date": "2026-05-01",
   "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "dist/client",
+    "binding": "ASSETS"
+  },
   "ai": { "binding": "AI" },
   "durable_objects": {
     "bindings": [
@@ -45,6 +49,7 @@
   "vars": {
     "OPEN_THINK_STARTER": "personal-agent",
     "OPEN_THINK_AGENT_NAME": "Personal Agent",
-    "OPEN_THINK_DEFAULT_MODEL": "@cf/moonshotai/kimi-k2.5"
+    "OPEN_THINK_DEFAULT_MODEL": "@cf/moonshotai/kimi-k2.5",
+    "OPEN_THINK_TOOL_APPROVAL_POLICY": "auto"
   }
 }

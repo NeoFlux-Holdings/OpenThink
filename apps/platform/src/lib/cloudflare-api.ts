@@ -3,8 +3,16 @@ import { renderAgentWorkerModule } from "./agent-worker-template";
 import {
   createGeneratedRuntimePublisher,
   type GeneratedRuntimePublishResult,
-  type GeneratedRuntimePublisher
+  type GeneratedRuntimePublisher,
+  type WorkerAssetUpload
 } from "./generated-runtime-publisher";
+import {
+  normalizePersonalAgentConfig,
+  personalAgentPublicConfigBindingText,
+  personalAgentSetupSql,
+  publicPersonalAgentConfig,
+  type NormalizedPersonalAgentSubsystemConfig
+} from "./personal-agent-options";
 import { readEnvString } from "./platform-env";
 import { platformD1SchemaSql } from "./platform-schema";
 
@@ -20,6 +28,7 @@ export interface CloudflareResourcePlan {
   scriptName: string;
   generatedRuntime?: GeneratedRuntimePublishResult;
   openThinkWorkspace?: Record<string, unknown>;
+  openThinkPersonalAgent?: Record<string, unknown>;
   d1Database: {
     name: string;
     id?: string;
@@ -101,6 +110,11 @@ interface WorkerUploadMetadata {
   compatibility_date: string;
   compatibility_flags: string[];
   bindings: Array<Record<string, unknown>>;
+  migrations?: Record<string, unknown>;
+  assets?: {
+    jwt: string;
+    config?: Record<string, unknown>;
+  };
   keep_bindings?: string[];
 }
 
@@ -175,6 +189,15 @@ interface ArtifactTokenResult {
   plaintext: string;
   scope: "read" | "write";
   expires_at: string;
+}
+
+interface WorkerAssetsUploadSessionResult {
+  jwt?: string;
+  buckets?: string[][];
+}
+
+interface WorkerAssetsUploadResult {
+  jwt?: string;
 }
 
 export interface CloudflareTokenInspection {
@@ -527,6 +550,90 @@ export class CloudflareApiClient {
         "Workers Scripts Write"
       );
     }
+  }
+
+  async uploadWorkerAssets(input: {
+    scriptName: string;
+    assets: WorkerAssetUpload[];
+  }): Promise<{ jwt: string }> {
+    const manifest = Object.fromEntries(
+      input.assets.map((asset) => [
+        normalizeAssetPath(asset.path),
+        {
+          hash: asset.hash,
+          size: asset.size
+        }
+      ])
+    );
+    const assetsByHash = new Map(input.assets.map((asset) => [asset.hash, asset]));
+    const session = await this.request<WorkerAssetsUploadSessionResult>(
+      `/accounts/${this.options.accountId}/workers/scripts/${input.scriptName}/assets-upload-session`,
+      {
+        method: "POST",
+        body: { manifest },
+        operation: "Create Worker asset upload session",
+        requiredPermission: "Workers Scripts Write"
+      }
+    );
+    let completionJwt = session.jwt;
+    if (!completionJwt) {
+      throw new CloudflareApiError(
+        "Create Worker asset upload session failed: Cloudflare did not return an upload token.",
+        502,
+        session,
+        "Create Worker asset upload session",
+        "Workers Scripts Write"
+      );
+    }
+
+    for (const bucket of session.buckets ?? []) {
+      if (bucket.length === 0) continue;
+      const form = new FormData();
+      for (const hash of bucket) {
+        const asset = assetsByHash.get(hash);
+        if (!asset) {
+          throw new CloudflareApiError(
+            `Create Worker asset upload session failed: Cloudflare requested unknown asset hash ${hash}.`,
+            502,
+            session,
+            "Upload Worker assets",
+            "Workers Scripts Write"
+          );
+        }
+        form.append(hash, new Blob([asset.base64], { type: asset.contentType }));
+      }
+
+      const uploadUrl = `${this.baseUrl}/accounts/${this.options.accountId}/workers/assets/upload?base64=true`;
+      const response = await this.fetcher(uploadUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${completionJwt}`
+        },
+        body: form
+      });
+      const body = (await response.json().catch(() => null)) as
+        | CloudflareEnvelope<WorkerAssetsUploadResult>
+        | null;
+
+      if (!response.ok || body?.success === false) {
+        const cloudflareMessage =
+          body?.errors?.[0]?.message ?? `Worker asset upload failed with ${response.status}`;
+        throw new CloudflareApiError(
+          formatCloudflareErrorMessage({
+            operation: "Upload Worker assets",
+            cloudflareMessage,
+            requiredPermission: "Workers Scripts Write"
+          }),
+          response.status,
+          body,
+          "Upload Worker assets",
+          "Workers Scripts Write"
+        );
+      }
+      completionJwt = body?.result?.jwt ?? completionJwt;
+    }
+
+    return { jwt: completionJwt };
   }
 
   async listWorkerScripts(): Promise<CloudflareWorkerScriptResult[]> {
@@ -975,6 +1082,10 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
     if (queueId) queuePlan.id = queueId;
 
     await this.client.executeD1Sql(d1Id, platformD1SchemaSql);
+    const personalAgentSql = personalAgentSetupSql(request.personalAgent, deploymentId);
+    if (personalAgentSql) {
+      await this.client.executeD1Sql(d1Id, personalAgentSql);
+    }
 
     const wrangler = generateWranglerPlan(request.starterTemplate, deploymentId, {
       databaseName: d1Database.name,
@@ -997,6 +1108,7 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
       defaultModel: request.defaultModel ?? "@cf/moonshotai/kimi-k2.6",
       modelProvider: request.modelProvider ?? inferModelProvider(request.defaultModel),
       thinkingLevel: request.thinkingLevel ?? "medium",
+      personalAgent: normalizePersonalAgentConfig(request.personalAgent),
       cloudflareAccountId: request.cloudflareAccountId?.trim() || this.clientAccountId,
       ...(sourceSha ? { sourceSha } : {}),
       ...(request.cfApiToken ? { cloudflareApiToken: request.cfApiToken } : {}),
@@ -1038,6 +1150,7 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
       runtimePublishInput.apiToken = runtimeApiToken;
     }
     const generatedRuntime = await this.runtimePublisher.publish(runtimePublishInput);
+    const personalAgent = normalizePersonalAgentConfig(request.personalAgent);
     const openThinkWorkspace = generatedRuntime.artifact
       ? {
           mode: "artifacts-sandbox-workspace",
@@ -1125,6 +1238,9 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
       scriptName: names.script,
       generatedRuntime,
       ...(openThinkWorkspace ? { openThinkWorkspace } : {}),
+      ...(personalAgent.enabled
+        ? { openThinkPersonalAgent: publicPersonalAgentConfig(personalAgent) }
+        : {}),
       d1Database: d1Plan,
       r2Bucket: {
         name: r2Bucket.name
@@ -1359,6 +1475,7 @@ function generateWorkerUploadMetadata(input: {
   defaultModel: string;
   modelProvider: "workers-ai" | "openrouter" | "anthropic" | "openai";
   thinkingLevel: "low" | "medium" | "high" | "xhigh";
+  personalAgent: NormalizedPersonalAgentSubsystemConfig;
   cloudflareAccountId: string;
   cloudflareApiToken?: string;
   openRouterApiKey?: string;
@@ -1415,6 +1532,38 @@ function generateWorkerUploadMetadata(input: {
         name: "OPEN_THINK_THINKING_LEVEL",
         text: input.thinkingLevel
       },
+      ...(input.personalAgent.enabled
+        ? [
+            {
+              type: "plain_text",
+              name: "OPEN_THINK_PERSONAL_AGENT_CONFIG",
+              text: personalAgentPublicConfigBindingText(input.personalAgent)
+            }
+          ]
+        : []),
+      {
+        type: "plain_text",
+        name: "OPEN_THINK_TOOL_APPROVAL_POLICY",
+        text: input.personalAgent.toolApprovalPolicy
+      },
+      ...(input.personalAgent.soulPrompt
+        ? [
+            {
+              type: "secret_text",
+              name: "OPEN_THINK_SOUL_PROMPT",
+              text: input.personalAgent.soulPrompt
+            }
+          ]
+        : []),
+      ...(input.personalAgent.launchBrief
+        ? [
+            {
+              type: "secret_text",
+              name: "OPEN_THINK_LAUNCH_BRIEF",
+              text: input.personalAgent.launchBrief
+            }
+          ]
+        : []),
       {
         type: "plain_text",
         name: "OPEN_THINK_SCRIPT_NAME",
@@ -1510,6 +1659,11 @@ function splitSqlStatements(sql: string): string[] {
     .split(";")
     .map((statement) => statement.trim())
     .filter(Boolean);
+}
+
+function normalizeAssetPath(path: string): string {
+  const trimmed = path.trim().replace(/\\/g, "/");
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
 
 function formatCloudflareErrorMessage(input: {

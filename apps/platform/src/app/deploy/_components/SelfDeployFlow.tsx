@@ -2,7 +2,6 @@
 
 import {
   CheckCircle2,
-  Cloud,
   ExternalLink,
   KeyRound,
   LockKeyhole,
@@ -13,6 +12,12 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { DeploymentRequest } from "@/lib/deployment-engine";
+import {
+  PersonalAgentConfigurator,
+  createPersonalAgentConfiguratorState,
+  personalAgentConfigFromConfiguratorState,
+  personalAgentConfiguratorIssue
+} from "./PersonalAgentConfigurator";
 import {
   buildOpenThinkTokenUrl,
   openThinkTokenPermissions
@@ -112,6 +117,10 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
   const [spendLimitUsd, setSpendLimitUsd] = useState(100);
   const [defaultModel, setDefaultModel] = useState("@cf/moonshotai/kimi-k2.6");
   const [thinkingLevel, setThinkingLevel] = useState<"low" | "medium" | "high" | "xhigh">("medium");
+  const [personalAgentEnabled, setPersonalAgentEnabled] = useState(true);
+  const [personalAgentConfig, setPersonalAgentConfig] = useState(() =>
+    createPersonalAgentConfiguratorState()
+  );
   const [openRouterApiKey, setOpenRouterApiKey] = useState("");
   const [anthropicApiKey, setAnthropicApiKey] = useState("");
   const [openAiApiKey, setOpenAiApiKey] = useState("");
@@ -133,6 +142,13 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
   );
   const selectedModel = modelOptions.find((model) => model.id === defaultModel);
   const selectedProvider = selectedModel?.provider ?? "workers-ai";
+  const personalAgentIssue =
+    personalAgentEnabled
+      ? personalAgentConfiguratorIssue(
+          personalAgentConfig,
+          "Custom .brain setup needs a stack name or a soul prompt before launch."
+        )
+      : null;
   const selectedZone = inspection?.zones.find((zone) => zone.id === customZoneId);
   const suggestedHostPrefix = sanitizeDomainLabel(agentName);
   const effectiveHostPrefix = customHostPrefixDirty ? customHostPrefix : suggestedHostPrefix;
@@ -180,6 +196,10 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
           .split(/[,\n]/)
           .map((email) => email.trim())
           .filter(Boolean);
+        const personalAgent = personalAgentConfigFromConfiguratorState(personalAgentConfig, {
+          enabled: personalAgentEnabled
+        });
+
         const payload: Partial<DeploymentRequest> = {
           agentName,
           cloudflareAccountId,
@@ -195,7 +215,8 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
             openRouterApiKey,
             anthropicApiKey,
             openAiApiKey
-          }
+          },
+          personalAgent
         };
         if (customDomainEnabled) {
           payload.customDomain = {
@@ -397,6 +418,44 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
         </span>
       </div>
 
+      <div className="personal-agent-panel">
+        <div className="personal-agent-header">
+          <div>
+            <span className="eyebrow">Personal agent</span>
+            <h3>Brain and stack setup</h3>
+            <p>
+              Choose the memory and workflow subsystem. OpenThink seeds the setup into the deployed
+              agent during provisioning.
+            </p>
+          </div>
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={personalAgentEnabled}
+              onChange={(event) => setPersonalAgentEnabled(event.target.checked)}
+            />
+            <span>{personalAgentEnabled ? "Enabled" : "Disabled"}</span>
+          </label>
+        </div>
+
+        {personalAgentEnabled ? (
+          <>
+            <PersonalAgentConfigurator
+              state={personalAgentConfig}
+              onChange={setPersonalAgentConfig}
+              idPrefix="launch-personal-agent"
+              presetInput="cards"
+              showSetupSequence
+              featureSummaryLimit={7}
+              customNameLabel="Custom stack name"
+              soulPromptLabel="Custom .brain / soul prompt"
+              launchBriefLabel="Initial launch brief"
+            />
+            {personalAgentIssue ? <p className="notice">{personalAgentIssue}</p> : null}
+          </>
+        ) : null}
+      </div>
+
       <details className="advanced-provider">
         <summary>Advanced BYOK provider keys</summary>
         <p className="field-hint">
@@ -508,7 +567,11 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
         />
       </div>
 
-      <button className="button button-primary" type="submit" disabled={isDeploying || !cfApiToken}>
+      <button
+        className="button button-primary"
+        type="submit"
+        disabled={isDeploying || !cfApiToken || Boolean(personalAgentIssue)}
+      >
         {isDeploying ? <ShieldCheck size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
         {isDeploying ? "Launching agent" : "Launch my personal agent"}
       </button>

@@ -1,17 +1,38 @@
 "use client";
 
-import { Bot, Database, Radio, Send, ShieldCheck, User } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  Database,
+  Radio,
+  RotateCcw,
+  Send,
+  ShieldCheck,
+  Square,
+  User
+} from "lucide-react";
 import { Streamdown } from "streamdown";
 import { useAgentChat } from "@open-think/ui";
 
 const runtimeRows = [
   { label: "Persistence", value: "Embedded SQLite", Icon: Database },
-  { label: "Transport", value: "Hibernatable WebSocket", Icon: Radio },
+  { label: "Transport", value: "SSE stream, Agents WebSocket ready", Icon: Radio },
   { label: "Auth", value: "Access or JWT at Worker entry", Icon: ShieldCheck }
 ] as const;
 
 export function ChatWorkspace() {
-  const { messages, input, setInput, send, isSending, error } = useAgentChat();
+  const {
+    messages,
+    input,
+    setInput,
+    send,
+    stop,
+    clearHistory,
+    isSending,
+    status,
+    transport,
+    error
+  } = useAgentChat({ loadHistory: true });
 
   return (
     <section className="workspace-page" aria-label="Agent chat workspace">
@@ -19,11 +40,21 @@ export function ChatWorkspace() {
         <div className="surface-header">
           <div className="page-kicker">ChatDO</div>
           <h1>Agent conversation</h1>
-          <p>WebSocket hibernation, resumable streams, SQLite persistence.</p>
+          <p>Durable history, streamed responses, native Agents SDK WebSocket path for deployed runtimes.</p>
+          <div className="chat-status" data-state={status}>
+            <Activity size={15} aria-hidden="true" />
+            <span>{status === "idle" ? "Ready" : status}</span>
+            <span>{transport.toUpperCase()}</span>
+          </div>
         </div>
         <div className="message-list" aria-live="polite">
           {messages.map((message) => (
-            <div className="message-row" data-role={message.role} key={message.id}>
+            <div
+              className="message-row"
+              data-pending={String(Boolean(message.metadata?.streaming))}
+              data-role={message.role}
+              key={message.id}
+            >
               <span className="message-avatar">
                 {message.role === "user" ? (
                   <User size={16} aria-hidden="true" />
@@ -53,10 +84,32 @@ export function ChatWorkspace() {
             onChange={(event) => setInput(event.target.value)}
             placeholder="Ask the agent to inspect, deploy, or repair a Cloudflare resource"
           />
-          <button className="button button-primary" type="submit" disabled={isSending}>
-            <Send size={16} aria-hidden="true" />
-            {isSending ? "Sending" : "Send"}
-          </button>
+          <div className="composer-actions">
+            <button className="button button-primary" type="submit" disabled={isSending}>
+              <Send size={16} aria-hidden="true" />
+              {isSending ? "Sending" : "Send"}
+            </button>
+            <button
+              aria-label="Stop response"
+              className="button-icon"
+              disabled={!isSending}
+              onClick={stop}
+              title="Stop response"
+              type="button"
+            >
+              <Square size={15} aria-hidden="true" />
+            </button>
+            <button
+              aria-label="Clear history"
+              className="button-icon"
+              disabled={isSending}
+              onClick={() => void clearHistory()}
+              title="Clear history"
+              type="button"
+            >
+              <RotateCcw size={15} aria-hidden="true" />
+            </button>
+          </div>
         </form>
       </div>
 
