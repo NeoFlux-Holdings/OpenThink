@@ -47,6 +47,8 @@ Artifacts sync deploys fail closed unless `ARTIFACTS_REMOTE`, `ARTIFACTS_TOKEN`,
 
 Deployed personal agents use `OPEN_THINK_UPDATE_REPOSITORY=NeoFlux-Holdings/OpenThink` by default for upstream remote-update checks.
 
+Future contribution flow: an agent-owned draft workspace can keep user-specific artifacts separately, then open a branch and pull request against `NeoFlux-Holdings/OpenThink` through GitHub when the owner wants to contribute a reusable change upstream.
+
 ## Verify
 
 ```bash

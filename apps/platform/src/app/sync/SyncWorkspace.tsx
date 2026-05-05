@@ -61,6 +61,8 @@ type TokenVerificationPayload = {
 export function SyncWorkspace() {
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [result, setResult] = useState<SyncResult | null>(null);
+  const [deploymentStatus, setDeploymentStatus] = useState<SyncStatus | null>(null);
+  const [deploymentResult, setDeploymentResult] = useState<SyncResult | null>(null);
   const [deploymentUpdates, setDeploymentUpdates] = useState<DeploymentUpdateSummary[]>([]);
   const [selectedDeploymentId, setSelectedDeploymentId] = useState("");
   const [updateToken, setUpdateToken] = useState("");
@@ -79,10 +81,12 @@ export function SyncWorkspace() {
   const headline = useMemo(() => {
     if (!status) return "Loading sync state";
     if (status.sourceOfTruth === "cloudflare-artifacts") {
-      return "Cloudflare Artifacts is canonical";
+      return "Cloudflare Artifacts draft sync is configured";
     }
-    return "Local dev memory sync is active";
+    return "Optional draft workspace is local-only";
   }, [status]);
+
+  const artifactActionsEnabled = status?.sourceOfTruth === "cloudflare-artifacts";
 
   const selectedDeployment = useMemo(
     () =>
@@ -353,8 +357,8 @@ export function SyncWorkspace() {
       if (!response.ok || !payload.deployment || !payload.status) {
         throw new Error(payload.error ?? "Deployment update failed.");
       }
-      setStatus(payload.status);
-      if (payload.result) setResult(payload.result);
+      setDeploymentStatus(payload.status);
+      if (payload.result) setDeploymentResult(payload.result);
       setDeploymentUpdates((deployments) =>
         deployments.map((deployment) =>
           deployment.deploymentId === payload.deployment?.deploymentId
@@ -374,11 +378,11 @@ export function SyncWorkspace() {
       <div className="sync-main-column">
         <div className="surface sync-shell">
           <div className="surface-header">
-            <div className="page-kicker">Artifacts Git</div>
+            <div className="page-kicker">Optional Artifacts</div>
             <h1>{headline}</h1>
             <p>
-              Worker-side changes commit to Cloudflare Artifacts; local changes pull
-              from the same remote so manual and automatic sync use one path.
+              This is only for the advanced draft-workspace loop. Deployed-agent updates use
+              the GitHub upstream panel below.
             </p>
           </div>
           <div className="surface-body">
@@ -413,6 +417,11 @@ export function SyncWorkspace() {
             {status?.warnings.length ? (
               <p className="automation-note">{status.warnings[0]}</p>
             ) : null}
+            {!artifactActionsEnabled ? (
+              <p className="automation-note">
+                Cloudflare Artifacts Git is not configured. This is fine for normal agent updates.
+              </p>
+            ) : null}
             {result ? (
               <p className="success-box">
                 {result.message}
@@ -426,7 +435,7 @@ export function SyncWorkspace() {
               return (
                 <button
                   className="button"
-                  disabled={isWorking !== null}
+                  disabled={isWorking !== null || !artifactActionsEnabled}
                   key={item.action}
                   type="button"
                   onClick={() => void runManual(item.action)}
@@ -501,7 +510,7 @@ export function SyncWorkspace() {
                   {deploymentUpdates.length ? (
                     deploymentUpdates.map((deployment) => (
                       <option value={deployment.deploymentId} key={deployment.deploymentId}>
-                        {deployment.agentName} · {deployment.deploymentId}
+                        {deployment.agentName} - {deployment.deploymentId}
                       </option>
                     ))
                   ) : (
@@ -530,6 +539,31 @@ export function SyncWorkspace() {
             ) : null}
             {selectedDeployment?.metadata?.lastError ? (
               <p className="notice">{selectedDeployment.metadata.lastError}</p>
+            ) : null}
+            <div className="resource-plan">
+              {[
+                ["Update source", deploymentStatus?.sourceOfTruth ?? "github-upstream"],
+                ["GitHub remote", deploymentStatus?.remoteUrl],
+                ["Remote SHA", deploymentStatus?.remoteHead],
+                ["Deployed SHA", deploymentStatus?.deployedHead],
+                ["Drift", deploymentStatus?.drift]
+              ].map(([label, value]) => (
+                <div className="resource-row" key={label}>
+                  <span>
+                    <strong>{label}</strong>
+                  </span>
+                  <code>{value ?? "not checked"}</code>
+                </div>
+              ))}
+            </div>
+            {deploymentStatus?.warnings.length ? (
+              <p className="automation-note">{deploymentStatus.warnings[0]}</p>
+            ) : null}
+            {deploymentResult ? (
+              <p className="success-box">
+                {deploymentResult.message}
+                {deploymentResult.commitSha ? <code> {deploymentResult.commitSha}</code> : null}
+              </p>
             ) : null}
           </div>
           <div className="surface-footer sync-action-grid">
@@ -590,8 +624,8 @@ export function SyncWorkspace() {
       <aside className="surface">
         <div className="surface-header">
           <div className="page-kicker">Automation</div>
-          <h2>Sync policy</h2>
-          <p>Manual controls use the same reconciler as the Worker cron.</p>
+          <h2>Draft sync policy</h2>
+          <p>These controls apply only to the optional Cloudflare Artifacts workspace.</p>
         </div>
         <div className="surface-body">
           <div className="terminal-row">
@@ -626,7 +660,7 @@ export function SyncWorkspace() {
             <button
               className="button button-primary"
               type="button"
-              disabled={isWorking !== null}
+              disabled={isWorking !== null || !artifactActionsEnabled}
               onClick={() =>
                 void updateAuto({
                   enabled: !(status?.autoSync.enabled ?? false)
