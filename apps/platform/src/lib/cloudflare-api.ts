@@ -1365,7 +1365,7 @@ function generateWorkerUploadMetadata(input: {
       {
         type: "plain_text",
         name: "OPEN_THINK_UPDATE_REPOSITORY",
-        text: "tzarebczan/open-think"
+        text: "NeoFlux-Holdings/OpenThink"
       },
       {
         type: "plain_text",

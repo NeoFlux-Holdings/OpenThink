@@ -350,7 +350,7 @@ async function handleChat(request, env) {
         "D1 memory is available through the built-in memory_list tool and the /memory endpoint. If asked what memory says, answer from recent D1 memory rows or call memory_list. Do not ask the owner for the D1 database id for this agent's own memory.",
         "R2 files are available through files_list and /files. Tasks are available through queue_task and /tasks. Runtime and update status are available through runtime_status and /runtime/context.",
         "Vectorize is provisioned as semantic memory when the VECTORIZE binding is present; explain that vector query wiring is a next runtime tool if no direct vector query tool is available.",
-        "For source updates, explain the two supported paths: managed remote updates from the configured GitHub/open-think repository through the platform Artifacts/mcpu-style reconciler, or this runtime's /updates/apply endpoint that uploads a built worker.js bundle through the Workers Scripts API while preserving secrets. Managed remote updates are preferred when the owner wants to pull from upstream; direct bundle updates are for a verified generated artifact.",
+        "For source updates, explain the two supported paths: managed remote updates from the configured GitHub NeoFlux-Holdings/OpenThink repository through the platform Artifacts/mcpu-style reconciler, or this runtime's /updates/apply endpoint that uploads a built worker.js bundle through the Workers Scripts API while preserving secrets. Managed remote updates are preferred when the owner wants to pull from upstream; direct bundle updates are for a verified generated artifact.",
         "If local agent changes and remote updates both exist, use this order: snapshot current runtime status, identify local changes or bindings/secrets, fetch remote status, propose rebase or reconcile, ask before destructive replacement, then deploy with secret preservation. Treat this as the update-management playbook.",
         "Secrets are managed through /secrets and the secret_put tool. Non-secret bindings are managed through /updates/bindings and the binding_add tool, which patches Worker script settings. For new resource-backed bindings, create or identify the Cloudflare resource first, then bind its id/name.",
         "When the owner asks for Cloudflare operations, use the mcp_call tool. For destructive or expensive actions, explain the exact operation and ask for confirmation before using execute.",
@@ -1102,7 +1102,7 @@ async function runtimeSnapshot(env) {
     sourceUpdate: {
       platformUpdateApi: "/api/deployment/update on the open-think platform",
       artifactSync: "mcpu-style Artifacts Git flow: pull, commit, push, deploy, reconcile",
-      remoteRepository: env.OPEN_THINK_UPDATE_REPOSITORY || "tzarebczan/open-think",
+      remoteRepository: env.OPEN_THINK_UPDATE_REPOSITORY || "NeoFlux-Holdings/OpenThink",
       remoteBranch: env.OPEN_THINK_UPDATE_BRANCH || "main",
       remoteBundlePath: env.OPEN_THINK_UPDATE_BUNDLE_PATH || "dist/worker.js",
       remoteStatusEndpoint: "/updates/remote",
@@ -1524,7 +1524,7 @@ function normalizeWorkerBinding(input) {
 
 function remoteUpdateConfig(env) {
   return {
-    repository: String(env.OPEN_THINK_UPDATE_REPOSITORY || "tzarebczan/open-think"),
+    repository: String(env.OPEN_THINK_UPDATE_REPOSITORY || "NeoFlux-Holdings/OpenThink"),
     branch: String(env.OPEN_THINK_UPDATE_BRANCH || "main"),
     bundlePath: String(env.OPEN_THINK_UPDATE_BUNDLE_PATH || "dist/worker.js")
   };
@@ -3065,7 +3065,7 @@ function renderAgentAppHtml(): string {
           : (data.error || "Runtime updates need Cloudflare API token, account id, and script name.");
         metricBox.innerHTML = [
           metric("Script", data.scriptName || "unknown"),
-          metric("Remote", data.remote?.repository || "tzarebczan/open-think"),
+          metric("Remote", data.remote?.repository || "NeoFlux-Holdings/OpenThink"),
           metric("Branch", data.remote?.branch || "main"),
           metric("Bundle", data.configuredBundleUrl ? "configured secret" : (data.remote?.bundlePath || "dist/worker.js"))
         ].join("");

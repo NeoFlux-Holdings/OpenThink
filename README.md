@@ -1,6 +1,8 @@
-# open-think
+# OpenThink
 
 `open-think` is a Cloudflare-native Personal Agent OS. The v3 platform is organized around a Worker entrypoint, Durable Object coordination, and Container-backed execution, with first-class deployment, chat, and terminal control surfaces.
+
+Public source: [NeoFlux-Holdings/OpenThink](https://github.com/NeoFlux-Holdings/OpenThink)
 
 ## What is included
 
@@ -40,6 +42,8 @@ Local `next dev` can launch agents with in-memory platform state. For persistent
 After bootstrap, `open-think` can use a Cloudflare Artifacts Git remote as the canonical repository. The platform exposes `/sync` for manual pull, commit, push, deploy, and reconcile actions, and the Worker cron can run the same reconciler automatically.
 
 Sync deploys fail closed unless `ARTIFACTS_REMOTE`, `ARTIFACTS_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and `OPEN_THINK_SCRIPT_NAME` are configured.
+
+Deployed personal agents use `OPEN_THINK_UPDATE_REPOSITORY=NeoFlux-Holdings/OpenThink` by default for upstream remote-update checks.
 
 ## Verify
 
