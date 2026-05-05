@@ -523,15 +523,6 @@ async function runGithubUpdateAction(input: {
     };
   }
 
-  if (input.action === "reconcile" && input.github.remoteHead && input.status.deployedHead === input.github.remoteHead) {
-    return {
-      action: "reconcile",
-      status: input.status,
-      message: `GitHub upstream ${input.github.repository}@${input.github.branch} already matches this deployment (${shortSha(input.github.remoteHead)}).`,
-      deployedSha: input.github.remoteHead
-    };
-  }
-
   const deployedSha = await uploadGeneratedWorkerFromGithub(input);
   const lastDeployAt = new Date().toISOString();
   return {

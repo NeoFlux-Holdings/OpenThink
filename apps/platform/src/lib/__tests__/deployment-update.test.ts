@@ -115,6 +115,61 @@ describe("deployment updates", () => {
     );
   });
 
+  it("reconcile uploads even when stored metadata claims the same upstream SHA", async () => {
+    let uploadCount = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const target = String(url);
+        if (target.includes("api.github.com/repos/NeoFlux-Holdings/OpenThink/commits/main")) {
+          return new Response(JSON.stringify({ sha: "abc123456789" }), {
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (target.includes("/accounts/acct/workers/scripts/open-think-agent")) {
+          uploadCount += 1;
+          return json({ result: {} });
+        }
+        return json({ result: {} });
+      }) as unknown as typeof fetch
+    );
+
+    const result = await runDeploymentUpdate({
+      deployment: deploymentRecord({
+        resourcePlan: {
+          openThinkUpdate: {
+            target: {
+              deploymentId: "agent-test",
+              accountId: "acct",
+              scriptName: "open-think-agent",
+              agentUrl: "https://open-think-agent.example.workers.dev"
+            },
+            autoUpdate: {
+              enabled: false,
+              direction: "bidirectional",
+              intervalSeconds: 300
+            },
+            lastAction: "reconcile",
+            lastCommitSha: "abc123456789",
+            lastDeployedSha: "abc123456789",
+            updatedAt: "2026-05-02T00:00:00.000Z"
+          }
+        }
+      }),
+      action: "reconcile",
+      env: {},
+      cfApiToken: "cf-token"
+    });
+
+    expect(uploadCount).toBe(1);
+    expect(result.result?.message).toContain("Uploaded open-think-agent");
+    expect(result.resourcePlan.openThinkUpdate).toMatchObject({
+      lastAction: "reconcile",
+      lastDeployedSha: "abc123456789"
+    });
+  });
+
   it("requires a typed confirmation before reset", async () => {
     await expect(
       runDeploymentUpdate({
