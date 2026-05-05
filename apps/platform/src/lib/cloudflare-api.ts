@@ -144,6 +144,22 @@ interface WorkerRouteResult {
   script?: string;
 }
 
+export interface CloudflareWorkerScriptResult {
+  id?: string;
+  script_name?: string;
+  name?: string;
+  created_on?: string;
+  modified_on?: string;
+}
+
+export interface CloudflareWorkerScriptSettings {
+  bindings?: Array<Record<string, unknown>>;
+  compatibility_date?: string;
+  compatibility_flags?: string[];
+  usage_model?: string;
+  logpush?: boolean;
+}
+
 interface ArtifactRepoResult {
   id: string;
   name: string;
@@ -510,6 +526,26 @@ export class CloudflareApiClient {
         "Workers Scripts Write"
       );
     }
+  }
+
+  async listWorkerScripts(): Promise<CloudflareWorkerScriptResult[]> {
+    return this.request<CloudflareWorkerScriptResult[]>(
+      `/accounts/${this.options.accountId}/workers/scripts?per_page=100`,
+      {
+        operation: "List Worker scripts",
+        requiredPermission: "Workers Scripts Write"
+      }
+    );
+  }
+
+  async getWorkerScriptSettings(scriptName: string): Promise<CloudflareWorkerScriptSettings> {
+    return this.request<CloudflareWorkerScriptSettings>(
+      `/accounts/${this.options.accountId}/workers/scripts/${scriptName}/settings`,
+      {
+        operation: "Read Worker script settings",
+        requiredPermission: "Workers Scripts Write"
+      }
+    );
   }
 
   async getWorkersSubdomain(): Promise<string | null> {

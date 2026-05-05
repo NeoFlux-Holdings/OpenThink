@@ -209,10 +209,13 @@ export function SyncWorkspace() {
     }
   }
 
-  async function loadDeploymentUpdates() {
+  async function loadDeploymentUpdates(token = updateToken): Promise<number | null> {
     setDeploymentError(null);
     try {
-      const response = await fetch("/api/deployment/update");
+      const headers: HeadersInit = {};
+      const trimmedToken = token.trim();
+      if (trimmedToken) headers["x-open-think-cf-api-token"] = trimmedToken;
+      const response = await fetch("/api/deployment/update", { headers });
       const payload = (await response.json()) as {
         deployments?: DeploymentUpdateSummary[];
         error?: string;
@@ -222,10 +225,12 @@ export function SyncWorkspace() {
       }
       setDeploymentUpdates(payload.deployments);
       setSelectedDeploymentId((current) => current || payload.deployments?.[0]?.deploymentId || "");
+      return payload.deployments.length;
     } catch (caught) {
       setDeploymentError(
         caught instanceof Error ? caught.message : "Deployment update status failed."
       );
+      return null;
     }
   }
 
@@ -269,6 +274,14 @@ export function SyncWorkspace() {
         : "Cloudflare account";
       const email = payload.inspection.defaultAccessEmail ?? payload.inspection.userEmail;
 
+      const refreshedCount = options.refreshTarget ? await loadDeploymentUpdates(trimmedToken) : null;
+      const refreshMessage =
+        refreshedCount === null
+          ? "Token verified; target refresh needs attention."
+          : refreshedCount > 0
+            ? `Target refreshed: ${refreshedCount} deployment${refreshedCount === 1 ? "" : "s"} available.`
+            : "Target refreshed, but no OpenThink deployments were found in this Cloudflare account.";
+
       if (payload.permissionIssue) {
         setTokenStatus({
           state: "warning",
@@ -276,17 +289,13 @@ export function SyncWorkspace() {
             email ? ` for ${email}` : ""
           }, but this token is missing ${
             payload.permissionIssue.cloudflare?.requiredPermission ?? "a required permission"
-          }.`
+          }. ${refreshMessage}`
         });
       } else {
         setTokenStatus({
           state: "verified",
-          message: `${accountLabel} verified${email ? ` for ${email}` : ""}. Target refreshed.`
+          message: `${accountLabel} verified${email ? ` for ${email}` : ""}. ${refreshMessage}`
         });
-      }
-
-      if (options.refreshTarget) {
-        await loadDeploymentUpdates();
       }
     } catch (caught) {
       setTokenStatus({
