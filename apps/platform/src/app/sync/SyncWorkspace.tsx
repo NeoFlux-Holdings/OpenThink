@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   CheckCircle2,
   Cloud,
   GitBranch,
@@ -10,12 +11,14 @@ import {
   KeyRound,
   ListRestart,
   RefreshCw,
+  RotateCcw,
   Rocket,
   Settings2,
   ShieldCheck
 } from "lucide-react";
 import type { AutoSyncConfig, SyncAction, SyncResult, SyncStatus } from "@open-think/sync";
 import type {
+  DeploymentResetMode,
   DeploymentUpdateAction,
   DeploymentUpdateSummary
 } from "@/lib/deployment-update";
@@ -66,6 +69,8 @@ export function SyncWorkspace() {
   const [deploymentUpdates, setDeploymentUpdates] = useState<DeploymentUpdateSummary[]>([]);
   const [selectedDeploymentId, setSelectedDeploymentId] = useState("");
   const [updateToken, setUpdateToken] = useState("");
+  const [resetMode, setResetMode] = useState<DeploymentResetMode>("source");
+  const [resetConfirmation, setResetConfirmation] = useState("");
   const [tokenStatus, setTokenStatus] = useState<TokenStatus>({
     state: "empty",
     message: "Paste a Cloudflare API token to unlock updates for deployed agents."
@@ -101,6 +106,13 @@ export function SyncWorkspace() {
     direction: "bidirectional" as const,
     intervalSeconds: 300
   };
+  const resetPhrase = selectedDeployment ? `RESET ${selectedDeployment.deploymentId}` : "RESET";
+  const resetReady = Boolean(selectedDeployment && resetConfirmation.trim() === resetPhrase);
+
+  useEffect(() => {
+    setResetConfirmation("");
+    setResetMode("source");
+  }, [selectedDeploymentId]);
 
   useEffect(() => {
     void refresh();
@@ -325,7 +337,8 @@ export function SyncWorkspace() {
 
   async function runDeploymentUpdate(
     action: DeploymentUpdateAction,
-    autoUpdate?: Partial<AutoSyncConfig>
+    autoUpdate?: Partial<AutoSyncConfig>,
+    reset?: { mode: DeploymentResetMode; confirmation: string }
   ) {
     if (!selectedDeployment) return;
     if (!selectedDeployment.canUpdateWithoutToken && !updateToken.trim()) {
@@ -345,7 +358,8 @@ export function SyncWorkspace() {
           deploymentId: selectedDeployment.deploymentId,
           action,
           ...(updateToken.trim() ? { cfApiToken: updateToken.trim() } : {}),
-          ...(autoUpdate ? { autoUpdate } : {})
+          ...(autoUpdate ? { autoUpdate } : {}),
+          ...(reset ? { reset } : {})
         })
       });
       const payload = (await response.json()) as {
@@ -366,6 +380,7 @@ export function SyncWorkspace() {
             : deployment
         )
       );
+      if (action === "reset") setResetConfirmation("");
     } catch (caught) {
       setDeploymentError(caught instanceof Error ? caught.message : "Deployment update failed.");
     } finally {
@@ -631,6 +646,69 @@ export function SyncWorkspace() {
                 {deploymentResult.message}
                 {deploymentResult.commitSha ? <code> {deploymentResult.commitSha}</code> : null}
               </p>
+            ) : null}
+            {selectedDeployment ? (
+              <div className="reset-zone">
+                <div className="reset-zone-header">
+                  <AlertTriangle size={18} aria-hidden="true" />
+                  <div>
+                    <h3>Reset controls</h3>
+                    <p>
+                      Restore this Worker from GitHub, or remove custom non-secret settings and
+                      return to the baseline OpenThink runtime. Encrypted Worker secrets are
+                      preserved.
+                    </p>
+                  </div>
+                </div>
+                <div className="form-grid reset-grid">
+                  <div className="field">
+                    <label htmlFor="deployment-reset-mode">Reset mode</label>
+                    <select
+                      id="deployment-reset-mode"
+                      value={resetMode}
+                      onChange={(event) =>
+                        setResetMode(event.target.value as DeploymentResetMode)
+                      }
+                    >
+                      <option value="source">Restore source from GitHub</option>
+                      <option value="factory-settings">Factory reset settings</option>
+                    </select>
+                    <span className="field-hint">
+                      {resetMode === "source"
+                        ? "Reuploads the generated Worker from upstream and keeps current workspace metadata."
+                        : "Reuploads upstream source, disables auto updates, removes workspace metadata, and drops custom non-secret bindings."}
+                    </span>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="deployment-reset-confirmation">
+                      Type <code>{resetPhrase}</code>
+                    </label>
+                    <input
+                      id="deployment-reset-confirmation"
+                      value={resetConfirmation}
+                      placeholder={resetPhrase}
+                      onChange={(event) => setResetConfirmation(event.target.value)}
+                    />
+                    <span className="field-hint">
+                      This confirmation is checked by the API before any Worker upload happens.
+                    </span>
+                  </div>
+                </div>
+                <button
+                  className="button button-danger"
+                  type="button"
+                  disabled={!resetReady || isDeploymentWorking !== null}
+                  onClick={() =>
+                    void runDeploymentUpdate("reset", undefined, {
+                      mode: resetMode,
+                      confirmation: resetConfirmation.trim()
+                    })
+                  }
+                >
+                  <RotateCcw size={16} aria-hidden="true" />
+                  {isDeploymentWorking === "reset" ? "Resetting" : "Run reset"}
+                </button>
+              </div>
             ) : null}
           </div>
           <div className="surface-footer sync-action-grid">

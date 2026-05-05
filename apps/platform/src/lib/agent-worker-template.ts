@@ -351,6 +351,7 @@ async function handleChat(request, env) {
         "R2 files are available through files_list and /files. Tasks are available through queue_task and /tasks. Runtime and update status are available through runtime_status and /runtime/context.",
         "Vectorize is provisioned as semantic memory when the VECTORIZE binding is present; explain that vector query wiring is a next runtime tool if no direct vector query tool is available.",
         "For source updates, explain three lanes: default managed updates from the configured GitHub NeoFlux-Holdings/OpenThink repository through the platform reconciler; optional self-editing through a per-agent Cloudflare Artifacts workspace plus Sandbox/Containers when enabled; and this runtime's /updates/apply endpoint for a verified built worker.js bundle. Managed GitHub updates are preferred for upstream releases. The Artifacts/Sandbox lane is for agent-authored changes, tests, diffs, and PR preparation, and can be added later when the account has paid capabilities.",
+        "For resets, prefer the platform /api/deployment/update action reset. Source restore reuploads the generated Worker from GitHub and keeps workspace metadata. Factory reset also disables auto update, removes workspace metadata and custom non-secret bindings, restores Kimi K2.6 Workers AI defaults, and preserves encrypted Worker secrets. Require explicit owner confirmation before reset.",
         "If local agent changes and remote updates both exist, use this order: snapshot current runtime status, identify local changes or bindings/secrets, fetch remote status, propose rebase or reconcile, ask before destructive replacement, then deploy with secret preservation. Treat this as the update-management playbook.",
         "Secrets are managed through /secrets and the secret_put tool. Non-secret bindings are managed through /updates/bindings and the binding_add tool, which patches Worker script settings. For new resource-backed bindings, create or identify the Cloudflare resource first, then bind its id/name.",
         "When the owner asks for Cloudflare operations, use the mcp_call tool. For destructive or expensive actions, explain the exact operation and ask for confirmation before using execute.",
@@ -1149,6 +1150,12 @@ async function runtimeSnapshot(env) {
       runtimeStatusEndpoint: "/updates/status",
       runtimeApplyEndpoint: "/updates/apply",
       runtimeBindingsEndpoint: "/updates/bindings",
+      reset: {
+        platformAction: "POST /api/deployment/update with action reset",
+        confirmation: "Type RESET " + deploymentId,
+        sourceRestore: "Reupload generated Worker from GitHub upstream while preserving current workspace metadata and encrypted secrets.",
+        factorySettings: "Reupload upstream source, disable auto updates, remove workspace metadata/custom non-secret bindings, restore Kimi K2.6 Workers AI defaults, and preserve encrypted Worker secrets."
+      },
       configuredBundleUrl: env.OPEN_THINK_UPDATE_BUNDLE_URL ? "OPEN_THINK_UPDATE_BUNDLE_URL is set" : null,
       directWorkerUpload: accountId && currentScript
         ? "/accounts/" + accountId + "/workers/scripts/" + currentScript
@@ -1159,6 +1166,7 @@ async function runtimeSnapshot(env) {
         : null,
       playbook: [
         "Prefer managed remote updates for upstream open-think changes.",
+        "Use reset only after explicit owner confirmation; factory reset preserves secrets but removes custom non-secret Worker settings.",
         "Use the Artifacts workspace for agent-authored code changes when OPEN_THINK_ARTIFACTS_REMOTE is configured.",
         "If Artifacts/Sandbox are not configured, explain that the account can keep basic GitHub updates now and add the self-evolving workspace later.",
         "Use direct bundle updates only for a verified worker.js artifact.",

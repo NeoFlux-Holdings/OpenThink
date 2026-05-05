@@ -47,6 +47,8 @@ Artifacts sync deploys fail closed unless `ARTIFACTS_REMOTE`, `ARTIFACTS_TOKEN`,
 
 Deployed personal agents use `OPEN_THINK_UPDATE_REPOSITORY=NeoFlux-Holdings/OpenThink` by default for upstream remote-update checks.
 
+The `/sync` update panel also includes a guarded reset path. Source restore reuploads the generated Worker from GitHub while preserving workspace metadata and encrypted Worker secrets. Factory reset requires typing `RESET <deployment-id>` and also disables auto updates, removes workspace metadata and custom non-secret Worker bindings, restores the Kimi K2.6 Workers AI defaults, and preserves encrypted Worker secrets.
+
 Future contribution flow: an agent-owned draft workspace can keep user-specific artifacts separately, then open a branch and pull request against `NeoFlux-Holdings/OpenThink` through GitHub when the owner wants to contribute a reusable change upstream.
 
 ## Verify

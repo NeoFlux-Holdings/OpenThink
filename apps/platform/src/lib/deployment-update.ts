@@ -8,7 +8,15 @@ import { readEnvString } from "./platform-env";
 export type DeploymentUpdateAction =
   | Extract<SyncAction, "pull" | "deploy" | "reconcile">
   | "status"
-  | "enable-workspace";
+  | "enable-workspace"
+  | "reset";
+
+export type DeploymentResetMode = "source" | "factory-settings";
+
+export interface DeploymentResetRequest {
+  mode: DeploymentResetMode;
+  confirmation: string;
+}
 
 export type DeploymentUpdateCredentialSource =
   | "request-token"
@@ -178,6 +186,7 @@ export async function runDeploymentUpdate(input: {
   env?: Record<string, unknown>;
   cfApiToken?: string;
   autoUpdate?: Partial<AutoSyncConfig>;
+  reset?: DeploymentResetRequest;
 }): Promise<DeploymentUpdateExecution> {
   const env = input.env ?? process.env;
   const target = readDeploymentUpdateTarget(input.deployment);
@@ -205,6 +214,51 @@ export async function runDeploymentUpdate(input: {
     autoUpdate,
     metadata: existingMetadata
   });
+
+  if (input.action === "reset") {
+    const resetInput: Parameters<typeof resetDeploymentFromGithub>[0] = {
+      deployment: input.deployment,
+      target,
+      credential,
+      env: updateEnv,
+      github,
+      autoUpdate
+    };
+    if (input.reset) resetInput.reset = input.reset;
+    const resetResult = await resetDeploymentFromGithub(resetInput);
+    const metadata = buildDeploymentUpdateMetadata({
+      target,
+      autoUpdate: resetResult.autoUpdate,
+      action: input.action,
+      status: resetResult.result.status,
+      env: updateEnv,
+      credentialSource: credential.source,
+      result: resetResult.result
+    });
+    const basePlan =
+      resetResult.mode === "factory-settings"
+        ? factoryResetResourcePlan(input.deployment.resourcePlan)
+        : input.deployment.resourcePlan;
+    const resourcePlan = resetResult.workspace
+      ? withDeploymentWorkspaceMetadata(
+          withDeploymentUpdateMetadata(basePlan, metadata),
+          resetResult.workspace
+        )
+      : withDeploymentUpdateMetadata(basePlan, metadata);
+
+    return {
+      summary: summarizeDeploymentUpdate(
+        {
+          ...input.deployment,
+          resourcePlan
+        },
+        updateEnv
+      ),
+      status: resetResult.result.status,
+      result: resetResult.result,
+      resourcePlan
+    };
+  }
 
   if (input.action === "enable-workspace") {
     const workspaceResult = await enableSelfEditingWorkspace({
@@ -575,6 +629,94 @@ async function enableSelfEditingWorkspace(input: {
   };
 }
 
+async function resetDeploymentFromGithub(input: {
+  deployment: DeploymentRecord;
+  target: DeploymentUpdateTarget;
+  credential: { source: DeploymentUpdateCredentialSource; apiToken?: string };
+  env: Record<string, unknown>;
+  github: GithubUpdateState;
+  autoUpdate: AutoSyncConfig;
+  reset?: DeploymentResetRequest;
+}): Promise<{
+  result: SyncResult;
+  workspace?: DeploymentWorkspaceMetadata | undefined;
+  autoUpdate: AutoSyncConfig;
+  mode: DeploymentResetMode;
+}> {
+  if (!input.credential.apiToken) {
+    throw new DeploymentUpdateError(
+      "Reset requires a Cloudflare API token. Paste a token or configure OPEN_THINK_DEPLOYMENT_UPDATE_API_TOKEN.",
+      401
+    );
+  }
+
+  const reset = normalizeResetRequest(input.reset);
+  assertResetConfirmation({
+    deploymentId: input.deployment.id,
+    scriptName: input.target.scriptName,
+    confirmation: reset.confirmation
+  });
+
+  const mode = reset.mode;
+  const factory = mode === "factory-settings";
+  const autoUpdate = factory ? { ...defaultAutoUpdate } : input.autoUpdate;
+  const sourceSha = input.github.remoteHead ?? readEnvString(input.env, "OPEN_THINK_SOURCE_SHA");
+  const workspace = factory
+    ? undefined
+    : readDeploymentWorkspaceMetadata(input.deployment.resourcePlan);
+  const client = new CloudflareApiClient({
+    accountId: input.target.accountId,
+    apiToken: input.credential.apiToken
+  });
+
+  await client.uploadWorkerModule({
+    scriptName: input.target.scriptName,
+    moduleName: "worker.js",
+    moduleCode: renderAgentWorkerModule({
+      request: deploymentRequestFromRecord(input.deployment, input.target, input.env, {
+        factoryDefaults: factory
+      }),
+      deploymentId: input.deployment.id,
+      scriptName: input.target.scriptName
+    }),
+    metadata: buildWorkerUploadMetadata(
+      input.deployment,
+      input.target,
+      input.env,
+      input.credential.source === "request-token" ? input.credential.apiToken : undefined,
+      sourceSha,
+      workspace,
+      undefined,
+      factory
+    )
+  });
+
+  const now = new Date().toISOString();
+  const status = githubSyncStatus({
+    github: input.github,
+    autoUpdate,
+    deployedHead: sourceSha,
+    lastSyncAt: now,
+    lastDeployAt: now
+  });
+
+  return {
+    mode,
+    ...(workspace ? { workspace } : {}),
+    autoUpdate,
+    result: {
+      action: "reconcile",
+      status,
+      message:
+        mode === "factory-settings"
+          ? `Factory reset ${input.target.scriptName} to the OpenThink GitHub upstream. Canonical D1/R2/Queue/Vectorize/AI bindings were restored, custom non-secret bindings and workspace metadata were removed, and encrypted Worker secrets were preserved.`
+          : `Restored ${input.target.scriptName} from the OpenThink GitHub upstream while preserving current workspace metadata and encrypted Worker secrets.`,
+      ...(input.github.remoteHead ? { commitSha: input.github.remoteHead } : {}),
+      ...(sourceSha ? { deployedSha: sourceSha } : {})
+    }
+  };
+}
+
 async function uploadGeneratedWorkerFromGithub(input: {
   deployment: DeploymentRecord;
   target: DeploymentUpdateTarget;
@@ -618,9 +760,10 @@ async function uploadGeneratedWorkerFromGithub(input: {
 function deploymentRequestFromRecord(
   deployment: DeploymentRecord,
   target: DeploymentUpdateTarget,
-  env: Record<string, unknown>
+  env: Record<string, unknown>,
+  options: { factoryDefaults?: boolean } = {}
 ): DeploymentRequest {
-  const runtime = readRuntimeConfig(deployment.resourcePlan, env);
+  const runtime = readRuntimeConfig(deployment.resourcePlan, env, options.factoryDefaults);
   const request: DeploymentRequest = {
     flow: deployment.flow,
     starterTemplate: deployment.starterTemplate,
@@ -842,6 +985,44 @@ function readWorkspaceStatus(value: unknown): "not-configured" | "ready-to-add" 
   return value === "ready-to-add" ? "ready-to-add" : "not-configured";
 }
 
+function normalizeResetRequest(reset: DeploymentResetRequest | undefined): DeploymentResetRequest {
+  const mode = reset?.mode === "factory-settings" ? reset.mode : "source";
+  return {
+    mode,
+    confirmation: reset?.confirmation?.trim() ?? ""
+  };
+}
+
+function assertResetConfirmation(input: {
+  deploymentId: string;
+  scriptName: string;
+  confirmation: string;
+}): void {
+  const expected = resetConfirmationPhrase(input.deploymentId);
+  if (input.confirmation !== expected) {
+    throw new DeploymentUpdateError(
+      `Reset requires typing "${expected}" to confirm ${input.scriptName}.`,
+      400
+    );
+  }
+}
+
+function resetConfirmationPhrase(deploymentId: string): string {
+  return `RESET ${deploymentId}`;
+}
+
+function factoryResetResourcePlan(resourcePlan: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...resourcePlan };
+  delete next.openThinkWorkspace;
+  delete next.generatedRuntime;
+  next.openThinkRuntime = {
+    defaultModel: "@cf/moonshotai/kimi-k2.6",
+    modelProvider: "workers-ai",
+    thinkingLevel: "medium"
+  };
+  return next;
+}
+
 function withDeploymentUpdateMetadata(
   resourcePlan: Record<string, unknown>,
   metadata: DeploymentUpdateMetadata
@@ -938,7 +1119,8 @@ function buildWorkerUploadMetadata(
   agentCloudflareApiToken?: string,
   sourceSha?: string,
   workspace?: DeploymentWorkspaceMetadata,
-  artifactToken?: string
+  artifactToken?: string,
+  factoryDefaults = false
 ): {
   main_module: string;
   compatibility_date: string;
@@ -952,7 +1134,7 @@ function buildWorkerUploadMetadata(
   const r2Bucket = readRecord(resourcePlan.r2Bucket);
   const queue = readRecord(resourcePlan.queue);
   const vectorizeIndex = readRecord(resourcePlan.vectorizeIndex);
-  const runtime = readRuntimeConfig(resourcePlan, env);
+  const runtime = readRuntimeConfig(resourcePlan, env, factoryDefaults);
   const updateRepository =
     readEnvString(env, "OPEN_THINK_UPDATE_REPOSITORY") ?? "NeoFlux-Holdings/OpenThink";
   const updateBranch = readEnvString(env, "OPEN_THINK_UPDATE_BRANCH") ?? "main";
@@ -1158,12 +1340,21 @@ function normalizeAutoUpdate(
 
 function readRuntimeConfig(
   resourcePlan: Record<string, unknown>,
-  env: Record<string, unknown>
+  env: Record<string, unknown>,
+  factoryDefaults = false
 ): {
   defaultModel: string;
   modelProvider: "workers-ai" | "openrouter" | "anthropic" | "openai";
   thinkingLevel: "low" | "medium" | "high" | "xhigh";
 } {
+  if (factoryDefaults) {
+    return {
+      defaultModel: "@cf/moonshotai/kimi-k2.6",
+      modelProvider: "workers-ai",
+      thinkingLevel: "medium"
+    };
+  }
+
   const runtime = readRecord(resourcePlan.openThinkRuntime);
   const defaultModel =
     readEnvString(env, "OPEN_THINK_DEFAULT_MODEL") ??

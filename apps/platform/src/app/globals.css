@@ -260,6 +260,16 @@ button {
   background: #963d0d;
 }
 
+.button-danger {
+  border-color: rgba(180, 59, 53, 0.42);
+  color: #fffaf2;
+  background: #b43b35;
+}
+
+.button-danger:hover:not(:disabled) {
+  background: #8d2d29;
+}
+
 .button-quiet {
   background: transparent;
 }
@@ -1338,6 +1348,39 @@ button {
   padding-top: 10px;
 }
 
+.reset-zone {
+  display: grid;
+  gap: 14px;
+  border: 1px solid rgba(180, 59, 53, 0.28);
+  border-radius: var(--radius);
+  padding: 14px;
+  background: rgba(180, 59, 53, 0.055);
+}
+
+.reset-zone-header {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  color: var(--red);
+}
+
+.reset-zone-header h3 {
+  margin: 0 0 4px;
+  color: var(--ink);
+  font-size: 1rem;
+}
+
+.reset-zone-header p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.reset-grid {
+  grid-template-columns: minmax(0, 0.48fr) minmax(0, 0.52fr);
+}
+
 .metric {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1445,7 +1488,8 @@ button {
   .automation-panel,
   .resource-row,
   .launch-grid,
-  .admin-metadata {
+  .admin-metadata,
+  .reset-grid {
     grid-template-columns: 1fr;
   }
 

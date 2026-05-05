@@ -10,6 +10,7 @@ import {
   DeploymentUpdateError,
   runDeploymentUpdate,
   summarizeDeploymentUpdate,
+  type DeploymentResetRequest,
   type DeploymentUpdateAction
 } from "@/lib/deployment-update";
 import type { DeploymentRecord, DeploymentRepository } from "@/lib/d1";
@@ -21,7 +22,8 @@ const updateActions = new Set<DeploymentUpdateAction>([
   "pull",
   "deploy",
   "reconcile",
-  "enable-workspace"
+  "enable-workspace",
+  "reset"
 ]);
 
 export async function GET(request: Request): Promise<Response> {
@@ -70,6 +72,7 @@ export async function POST(request: Request): Promise<Response> {
       action?: DeploymentUpdateAction;
       cfApiToken?: string;
       autoUpdate?: Partial<AutoSyncConfig>;
+      reset?: DeploymentResetRequest;
     };
     const action = payload.action ?? "status";
 
@@ -120,6 +123,7 @@ export async function POST(request: Request): Promise<Response> {
     };
     if (payload.cfApiToken) updateInput.cfApiToken = payload.cfApiToken;
     if (payload.autoUpdate) updateInput.autoUpdate = payload.autoUpdate;
+    if (payload.reset) updateInput.reset = payload.reset;
     const result = await runDeploymentUpdate(updateInput);
 
     await repository.repository.updateStatus(
