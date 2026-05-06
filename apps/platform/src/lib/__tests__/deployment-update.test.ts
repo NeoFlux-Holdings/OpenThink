@@ -31,6 +31,49 @@ describe("deployment updates", () => {
     expect(summary.credentialSource).toBe("deployment-update-token");
   });
 
+  it("warns before incompatible Agents SDK runtime update settings are used", () => {
+    const summary = summarizeDeploymentUpdate(
+      deploymentRecord({
+        resourcePlan: {
+          generatedRuntime: {
+            mode: "agents-sdk-container-build"
+          }
+        }
+      }),
+      {
+        OPEN_THINK_GENERATED_RUNTIME: "raw-worker-module",
+        OPEN_THINK_DEPLOYMENT_UPDATE_API_TOKEN: "update-token"
+      }
+    );
+
+    expect(summary.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Remove OPEN_THINK_GENERATED_RUNTIME=raw-worker-module")
+      ])
+    );
+  });
+
+  it("warns when Agents SDK updates are missing a deployed runtime build endpoint", () => {
+    const summary = summarizeDeploymentUpdate(
+      deploymentRecord({
+        resourcePlan: {
+          generatedRuntime: {
+            mode: "agents-sdk-container-build"
+          }
+        }
+      }),
+      {
+        OPEN_THINK_DEPLOYMENT_UPDATE_API_TOKEN: "update-token"
+      }
+    );
+
+    expect(summary.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("OPEN_THINK_RUNTIME_BUILD_ENDPOINT")
+      ])
+    );
+  });
+
   it("writes update metadata back into the deployment resource plan", async () => {
     const result = await runDeploymentUpdate({
       deployment: deploymentRecord(),

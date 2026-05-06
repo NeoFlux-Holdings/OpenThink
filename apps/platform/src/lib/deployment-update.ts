@@ -182,6 +182,7 @@ export function summarizeDeploymentUpdate(
   if (!credential.apiToken && deployment.authorization?.tokenFingerprint) {
     warnings.push("The original Cloudflare token is fingerprinted only; paste a token or configure OPEN_THINK_DEPLOYMENT_UPDATE_API_TOKEN.");
   }
+  warnings.push(...generatedRuntimeUpdateWarnings(deployment.resourcePlan, env));
 
   const summary: DeploymentUpdateSummary = {
     deploymentId: deployment.id,
@@ -817,21 +818,54 @@ function assertGeneratedRuntimeCanBeUpdated(
   deployment: DeploymentRecord,
   env: Record<string, unknown>
 ): void {
-  const requestedRuntime = readEnvString(env, "OPEN_THINK_GENERATED_RUNTIME")
-    ?.trim()
-    .toLowerCase();
-  if (requestedRuntime !== "raw-worker" && requestedRuntime !== "raw-worker-module") {
+  if (
+    !isRawGeneratedRuntimeRequested(env) ||
+    !generatedRuntimeMode(deployment.resourcePlan)?.startsWith("agents-sdk")
+  ) {
     return;
   }
-
-  const generatedRuntime = readRecord(deployment.resourcePlan.generatedRuntime);
-  const generatedMode = readString(generatedRuntime?.mode);
-  if (!generatedMode?.startsWith("agents-sdk")) return;
 
   throw new DeploymentUpdateError(
     "This deployment was created with the Agents SDK runtime, so Worker updates must also publish an Agents SDK bundle that exports PersonalChatAgent. Remove OPEN_THINK_GENERATED_RUNTIME=raw-worker-module or configure OPEN_THINK_RUNTIME_BUILD_ENDPOINT for managed updates.",
     400
   );
+}
+
+function generatedRuntimeUpdateWarnings(
+  resourcePlan: Record<string, unknown>,
+  env: Record<string, unknown>
+): string[] {
+  const mode = generatedRuntimeMode(resourcePlan);
+  if (!mode?.startsWith("agents-sdk")) return [];
+
+  if (isRawGeneratedRuntimeRequested(env)) {
+    return [
+      "This deployment uses the Agents SDK runtime. Remove OPEN_THINK_GENERATED_RUNTIME=raw-worker-module before updating it, or the generated Worker will not export PersonalChatAgent."
+    ];
+  }
+
+  const requestedRuntime = requestedGeneratedRuntimeMode(env);
+  const buildEndpoint = readEnvString(env, "OPEN_THINK_RUNTIME_BUILD_ENDPOINT");
+  if (!buildEndpoint && requestedRuntime !== "agents-sdk-local-build") {
+    return [
+      "Agents SDK updates need OPEN_THINK_RUNTIME_BUILD_ENDPOINT on a deployed platform Worker. Configure the runtime build endpoint before using Update Worker or Reconcile."
+    ];
+  }
+
+  return [];
+}
+
+function generatedRuntimeMode(resourcePlan: Record<string, unknown>): string | undefined {
+  return readString(readRecord(resourcePlan.generatedRuntime)?.mode);
+}
+
+function isRawGeneratedRuntimeRequested(env: Record<string, unknown>): boolean {
+  const requestedRuntime = requestedGeneratedRuntimeMode(env);
+  return requestedRuntime === "raw-worker" || requestedRuntime === "raw-worker-module";
+}
+
+function requestedGeneratedRuntimeMode(env: Record<string, unknown>): string | undefined {
+  return readEnvString(env, "OPEN_THINK_GENERATED_RUNTIME")?.trim().toLowerCase();
 }
 
 async function uploadGeneratedWorkerFromGithub(input: {

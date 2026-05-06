@@ -458,9 +458,7 @@ export function SyncWorkspace() {
             {status?.missing.length ? (
               <p className="notice">Missing: {status.missing.join(", ")}</p>
             ) : null}
-            {status?.warnings.length ? (
-              <p className="automation-note">{status.warnings[0]}</p>
-            ) : null}
+            <WarningList warnings={status?.warnings} />
             {!artifactActionsEnabled ? (
               <p className="automation-note">
                 Cloudflare Artifacts Git is not configured. This is fine for normal agent updates.
@@ -645,9 +643,7 @@ export function SyncWorkspace() {
                 </div>
               </div>
             ) : null}
-            {selectedDeployment?.warnings.length ? (
-              <p className="automation-note">{selectedDeployment.warnings[0]}</p>
-            ) : null}
+            <WarningList warnings={selectedDeployment?.warnings} />
             {selectedDeployment?.metadata?.lastError ? (
               <p className="notice">{selectedDeployment.metadata.lastError}</p>
             ) : null}
@@ -667,9 +663,7 @@ export function SyncWorkspace() {
                 </div>
               ))}
             </div>
-            {deploymentStatus?.warnings.length ? (
-              <p className="automation-note">{deploymentStatus.warnings[0]}</p>
-            ) : null}
+            <WarningList warnings={deploymentStatus?.warnings} />
             {deploymentResult ? (
               <p className="success-box">
                 {deploymentResult.message}
@@ -968,6 +962,19 @@ function SyncMetric({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
       <span>{label}</span>
     </div>
+  );
+}
+
+function WarningList({ warnings }: { warnings: string[] | undefined }) {
+  if (!warnings?.length) return null;
+  return (
+    <>
+      {warnings.map((warning, index) => (
+        <p className="automation-note" key={`${index}-${warning}`}>
+          {warning}
+        </p>
+      ))}
+    </>
   );
 }
 
