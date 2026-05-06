@@ -53,7 +53,7 @@ describe("deployment updates", () => {
     );
   });
 
-  it("warns when Agents SDK updates are missing a deployed runtime build endpoint", () => {
+  it("does not require a runtime build endpoint when localhost can build locally", () => {
     const summary = summarizeDeploymentUpdate(
       deploymentRecord({
         resourcePlan: {
@@ -63,6 +63,28 @@ describe("deployment updates", () => {
         }
       }),
       {
+        OPEN_THINK_DEPLOYMENT_UPDATE_API_TOKEN: "update-token"
+      }
+    );
+
+    expect(summary.warnings).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("OPEN_THINK_RUNTIME_BUILD_ENDPOINT")
+      ])
+    );
+  });
+
+  it("warns when explicit container build mode is missing a runtime build endpoint", () => {
+    const summary = summarizeDeploymentUpdate(
+      deploymentRecord({
+        resourcePlan: {
+          generatedRuntime: {
+            mode: "agents-sdk-container-build"
+          }
+        }
+      }),
+      {
+        OPEN_THINK_GENERATED_RUNTIME: "agents-sdk-container-build",
         OPEN_THINK_DEPLOYMENT_UPDATE_API_TOKEN: "update-token"
       }
     );

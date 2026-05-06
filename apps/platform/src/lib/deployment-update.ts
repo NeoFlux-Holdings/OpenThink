@@ -846,7 +846,11 @@ function generatedRuntimeUpdateWarnings(
 
   const requestedRuntime = requestedGeneratedRuntimeMode(env);
   const buildEndpoint = readEnvString(env, "OPEN_THINK_RUNTIME_BUILD_ENDPOINT");
-  if (!buildEndpoint && requestedRuntime !== "agents-sdk-local-build") {
+  if (
+    !buildEndpoint &&
+    requestedRuntime !== "agents-sdk-local-build" &&
+    (requestedRuntime === "agents-sdk-container-build" || !canUseLocalRuntimeBuild())
+  ) {
     return [
       "Agents SDK updates need OPEN_THINK_RUNTIME_BUILD_ENDPOINT on a deployed platform Worker. Configure the runtime build endpoint before using Update Worker or Reconcile."
     ];
@@ -866,6 +870,14 @@ function isRawGeneratedRuntimeRequested(env: Record<string, unknown>): boolean {
 
 function requestedGeneratedRuntimeMode(env: Record<string, unknown>): string | undefined {
   return readEnvString(env, "OPEN_THINK_GENERATED_RUNTIME")?.trim().toLowerCase();
+}
+
+function canUseLocalRuntimeBuild(): boolean {
+  return Boolean(
+    typeof process !== "undefined" &&
+      process.versions?.node &&
+      typeof process.cwd === "function"
+  );
 }
 
 async function uploadGeneratedWorkerFromGithub(input: {
