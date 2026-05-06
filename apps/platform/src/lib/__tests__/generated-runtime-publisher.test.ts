@@ -95,6 +95,7 @@ describe("createGeneratedRuntimePublisher", () => {
       },
       deploymentId: "agent-local-build-test",
       accountId: "account-id",
+      sourceSha: "source-sha",
       scriptName: "open-think-local-build-test",
       bindings: {
         scriptName: "open-think-local-build-test",
@@ -111,7 +112,13 @@ describe("createGeneratedRuntimePublisher", () => {
           main_module: "worker.js",
           compatibility_date: "2026-05-01",
           compatibility_flags: [],
-          bindings: []
+          bindings: [
+            {
+              type: "plain_text",
+              name: "OPEN_THINK_MODEL_PROVIDER",
+              text: "workers-ai"
+            }
+          ]
         }
       },
       wrangler: {}
@@ -138,6 +145,14 @@ describe("createGeneratedRuntimePublisher", () => {
         expect.objectContaining({
           name: "OPEN_THINK_TOOL_APPROVAL_POLICY",
           text: "ask-every-time"
+        }),
+        expect.objectContaining({
+          name: "OPEN_THINK_SOURCE_SHA",
+          text: "source-sha"
+        }),
+        expect.objectContaining({
+          name: "OPEN_THINK_MODEL_PROVIDER",
+          text: "workers-ai"
         })
       ])
     );

@@ -1130,6 +1130,7 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
       deploymentId,
       accountId: this.clientAccountId,
       scriptName: names.script,
+      ...(sourceSha ? { sourceSha } : {}),
       bindings: {
         scriptName: names.script,
         databaseName: d1Database.name,

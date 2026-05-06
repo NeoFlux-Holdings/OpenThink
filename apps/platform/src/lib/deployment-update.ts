@@ -1,6 +1,15 @@
 import type { AutoSyncConfig, SyncAction, SyncResult, SyncStatus } from "@open-think/sync";
 import { renderAgentWorkerModule } from "./agent-worker-template";
 import {
+  renderAgentsSdkWranglerJsonc,
+  type AgentsSdkRuntimeBindingPlan
+} from "./agents-sdk-runtime-template";
+import {
+  createGeneratedRuntimePublisher,
+  type GeneratedRuntimePublishInput,
+  type GeneratedRuntimePublishResult
+} from "./generated-runtime-publisher";
+import {
   normalizePersonalAgentConfig,
   normalizePersonalAgentToolApprovalPolicy,
   personalAgentPublicConfigBindingText,
@@ -595,23 +604,15 @@ async function enableSelfEditingWorkspace(input: {
   const deployedSha =
     input.github.remoteHead ?? readEnvString(input.env, "OPEN_THINK_SOURCE_SHA");
 
-  await client.uploadWorkerModule({
-    scriptName: input.target.scriptName,
-    moduleName: "worker.js",
-    moduleCode: renderAgentWorkerModule({
-      request: deploymentRequestFromRecord(input.deployment, input.target, input.env),
-      deploymentId: input.deployment.id,
-      scriptName: input.target.scriptName
-    }),
-    metadata: buildWorkerUploadMetadata(
-      input.deployment,
-      input.target,
-      input.env,
-      input.credential.source === "request-token" ? input.credential.apiToken : undefined,
-      deployedSha,
-      workspace,
-      artifact.token
-    )
+  await uploadDeploymentRuntime({
+    deployment: input.deployment,
+    target: input.target,
+    credential: input.credential,
+    env: input.env,
+    client,
+    ...(deployedSha ? { sourceSha: deployedSha } : {}),
+    workspace,
+    artifactToken: artifact.token
   });
 
   const now = new Date().toISOString();
@@ -686,25 +687,15 @@ async function resetDeploymentFromGithub(input: {
   };
   if (personalAgent) requestOptions.personalAgentOverride = personalAgent;
 
-  await client.uploadWorkerModule({
-    scriptName: input.target.scriptName,
-    moduleName: "worker.js",
-    moduleCode: renderAgentWorkerModule({
-      request: deploymentRequestFromRecord(input.deployment, input.target, input.env, requestOptions),
-      deploymentId: input.deployment.id,
-      scriptName: input.target.scriptName
-    }),
-    metadata: buildWorkerUploadMetadata(
-      input.deployment,
-      input.target,
-      input.env,
-      input.credential.source === "request-token" ? input.credential.apiToken : undefined,
-      sourceSha,
-      workspace,
-      undefined,
-      factory,
-      personalAgent
-    )
+  await uploadDeploymentRuntime({
+    deployment: input.deployment,
+    target: input.target,
+    credential: input.credential,
+    env: input.env,
+    client,
+    ...(sourceSha ? { sourceSha } : {}),
+    ...(workspace ? { workspace } : {}),
+    requestOptions
   });
 
   if (personalAgent?.enabled) {
@@ -745,6 +736,104 @@ async function resetDeploymentFromGithub(input: {
   };
 }
 
+async function uploadDeploymentRuntime(input: {
+  deployment: DeploymentRecord;
+  target: DeploymentUpdateTarget;
+  credential: { source: DeploymentUpdateCredentialSource; apiToken?: string };
+  env: Record<string, unknown>;
+  client?: CloudflareApiClient;
+  sourceSha?: string;
+  workspace?: DeploymentWorkspaceMetadata;
+  artifactToken?: string;
+  requestOptions?: {
+    factoryDefaults?: boolean;
+    personalAgentOverride?: PersonalAgentSubsystemConfig | NormalizedPersonalAgentSubsystemConfig;
+  };
+}): Promise<GeneratedRuntimePublishResult> {
+  if (!input.credential.apiToken) {
+    throw new DeploymentUpdateError(
+      "Updating a deployed Worker requires a Cloudflare API token. Paste a token or configure OPEN_THINK_DEPLOYMENT_UPDATE_API_TOKEN.",
+      401
+    );
+  }
+  assertGeneratedRuntimeCanBeUpdated(input.deployment, input.env);
+
+  const client =
+    input.client ??
+    new CloudflareApiClient({
+      accountId: input.target.accountId,
+      apiToken: input.credential.apiToken
+    });
+  const requestOptions = input.requestOptions ?? {};
+  const request = deploymentRequestFromRecord(
+    input.deployment,
+    input.target,
+    input.env,
+    requestOptions
+  );
+  const rawWorkerMetadata = buildWorkerUploadMetadata(
+    input.deployment,
+    input.target,
+    input.env,
+    input.credential.source === "request-token" ? input.credential.apiToken : undefined,
+    input.sourceSha,
+    input.workspace,
+    input.artifactToken,
+    Boolean(requestOptions.factoryDefaults),
+    requestOptions.personalAgentOverride
+  );
+  const bindings = runtimeBindingsFromRecord(input.deployment, input.target);
+  const publishInput: GeneratedRuntimePublishInput = {
+    request,
+    deploymentId: input.deployment.id,
+    accountId: input.target.accountId,
+    scriptName: input.target.scriptName,
+    ...(input.sourceSha ? { sourceSha: input.sourceSha } : {}),
+    bindings,
+    rawWorker: {
+      moduleName: "worker.js",
+      moduleCode: renderAgentWorkerModule({
+        request,
+        deploymentId: input.deployment.id,
+        scriptName: input.target.scriptName
+      }),
+      metadata: rawWorkerMetadata
+    },
+    wrangler: renderAgentsSdkWranglerJsonc({
+      request,
+      deploymentId: input.deployment.id,
+      bindings,
+      ...(input.sourceSha ? { sourceSha: input.sourceSha } : {})
+    })
+  };
+  if (input.credential.source === "request-token" && input.credential.apiToken) {
+    publishInput.apiToken = input.credential.apiToken;
+  }
+
+  return createGeneratedRuntimePublisher(client, input.env).publish(publishInput);
+}
+
+function assertGeneratedRuntimeCanBeUpdated(
+  deployment: DeploymentRecord,
+  env: Record<string, unknown>
+): void {
+  const requestedRuntime = readEnvString(env, "OPEN_THINK_GENERATED_RUNTIME")
+    ?.trim()
+    .toLowerCase();
+  if (requestedRuntime !== "raw-worker" && requestedRuntime !== "raw-worker-module") {
+    return;
+  }
+
+  const generatedRuntime = readRecord(deployment.resourcePlan.generatedRuntime);
+  const generatedMode = readString(generatedRuntime?.mode);
+  if (!generatedMode?.startsWith("agents-sdk")) return;
+
+  throw new DeploymentUpdateError(
+    "This deployment was created with the Agents SDK runtime, so Worker updates must also publish an Agents SDK bundle that exports PersonalChatAgent. Remove OPEN_THINK_GENERATED_RUNTIME=raw-worker-module or configure OPEN_THINK_RUNTIME_BUILD_ENDPOINT for managed updates.",
+    400
+  );
+}
+
 async function uploadGeneratedWorkerFromGithub(input: {
   deployment: DeploymentRecord;
   target: DeploymentUpdateTarget;
@@ -759,27 +848,15 @@ async function uploadGeneratedWorkerFromGithub(input: {
     );
   }
 
-  const client = new CloudflareApiClient({
-    accountId: input.target.accountId,
-    apiToken: input.credential.apiToken
-  });
   const sourceSha = input.github.remoteHead ?? readEnvString(input.env, "OPEN_THINK_SOURCE_SHA");
-  await client.uploadWorkerModule({
-    scriptName: input.target.scriptName,
-    moduleName: "worker.js",
-    moduleCode: renderAgentWorkerModule({
-      request: deploymentRequestFromRecord(input.deployment, input.target, input.env),
-      deploymentId: input.deployment.id,
-      scriptName: input.target.scriptName
-    }),
-    metadata: buildWorkerUploadMetadata(
-      input.deployment,
-      input.target,
-      input.env,
-      input.credential.source === "request-token" ? input.credential.apiToken : undefined,
-      sourceSha,
-      readDeploymentWorkspaceMetadata(input.deployment.resourcePlan)
-    )
+  const workspace = readDeploymentWorkspaceMetadata(input.deployment.resourcePlan);
+  await uploadDeploymentRuntime({
+    deployment: input.deployment,
+    target: input.target,
+    credential: input.credential,
+    env: input.env,
+    ...(sourceSha ? { sourceSha } : {}),
+    ...(workspace ? { workspace } : {})
   });
 
   return sourceSha;
@@ -811,6 +888,52 @@ function deploymentRequestFromRecord(
   };
   if (personalAgent.enabled) request.personalAgent = personalAgent;
   return request;
+}
+
+function runtimeBindingsFromRecord(
+  deployment: DeploymentRecord,
+  target: DeploymentUpdateTarget
+): AgentsSdkRuntimeBindingPlan {
+  const resourcePlan = deployment.resourcePlan;
+  const d1Database = readRecord(resourcePlan.d1Database);
+  const r2Bucket = readRecord(resourcePlan.r2Bucket);
+  const queue = readRecord(resourcePlan.queue);
+  const vectorizeIndex = readRecord(resourcePlan.vectorizeIndex);
+  const fallback = fallbackRuntimeNames(deployment, target);
+  const bindings: AgentsSdkRuntimeBindingPlan = {
+    scriptName: target.scriptName,
+    databaseName: readString(d1Database?.name) ?? fallback.databaseName,
+    bucketName: readString(r2Bucket?.name) ?? fallback.bucketName,
+    queueName:
+      readString(queue?.queue_name) ?? readString(queue?.name) ?? fallback.queueName,
+    vectorizeName: readString(vectorizeIndex?.name) ?? fallback.vectorizeName
+  };
+  const databaseId = readString(d1Database?.id) ?? readString(d1Database?.uuid);
+  if (databaseId) bindings.databaseId = databaseId;
+  return bindings;
+}
+
+function fallbackRuntimeNames(
+  deployment: DeploymentRecord,
+  target: DeploymentUpdateTarget
+): {
+  databaseName: string;
+  bucketName: string;
+  queueName: string;
+  vectorizeName: string;
+} {
+  const scriptBase =
+    target.scriptName
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || `open-think-${deployment.id.replace(/^agent-/, "").slice(0, 8) || "agent"}`;
+  return {
+    databaseName: `${scriptBase}-db`,
+    bucketName: `${scriptBase}-artifacts`,
+    queueName: `${scriptBase}-tasks`,
+    vectorizeName: `${scriptBase}-memory`
+  };
 }
 
 function readDeploymentUpdateTarget(

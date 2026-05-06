@@ -46,6 +46,7 @@ export interface GeneratedRuntimePublishInput {
   request: DeploymentRequest;
   deploymentId: string;
   accountId: string;
+  sourceSha?: string;
   apiToken?: string;
   scriptName: string;
   bindings: AgentsSdkRuntimeBindingPlan;
@@ -210,7 +211,8 @@ export class LocalAgentsSdkBuildPublisher implements GeneratedRuntimePublisher {
       const files = renderAgentsSdkPersonalAgentRuntime({
         request: input.request,
         deploymentId: input.deploymentId,
-        bindings: input.bindings
+        bindings: input.bindings,
+        ...(input.sourceSha ? { sourceSha: input.sourceSha } : {})
       });
       await writeRuntimeFiles(node, buildDir, files);
 
@@ -297,7 +299,8 @@ export class AgentsSdkContainerBuildPublisher implements GeneratedRuntimePublish
     const files = renderAgentsSdkPersonalAgentRuntime({
       request: input.request,
       deploymentId: input.deploymentId,
-      bindings: input.bindings
+      bindings: input.bindings,
+      ...(input.sourceSha ? { sourceSha: input.sourceSha } : {})
     });
     const repoName = artifactRepoName(input.scriptName);
     const artifact = await this.client.ensureArtifactRepoWithWriteToken({
@@ -325,6 +328,9 @@ export class AgentsSdkContainerBuildPublisher implements GeneratedRuntimePublish
     };
     if (input.apiToken) {
       buildRequest.apiToken = input.apiToken;
+    }
+    if (input.sourceSha) {
+      buildRequest.sourceSha = input.sourceSha;
     }
 
     const response = await (this.options.fetcher ?? fetch)(this.options.endpoint, {
@@ -373,6 +379,7 @@ interface RuntimeBuildRequest {
   deploymentId: string;
   accountId: string;
   apiToken?: string;
+  sourceSha?: string;
   scriptName: string;
   files: AgentsSdkRuntimeFile[];
   wrangler: Record<string, unknown>;
@@ -584,6 +591,7 @@ function buildAgentsSdkWorkerUploadMetadata(
 ): WorkerUploadMetadata {
   const personalAgent = normalizePersonalAgentConfig(input.request.personalAgent);
   const sourceSha =
+    input.sourceSha ??
     readEnvString(process.env, "OPEN_THINK_SOURCE_SHA") ??
     readEnvString(process.env, "GITHUB_SHA");
   const bindings: Array<Record<string, unknown>> = [
@@ -692,6 +700,7 @@ function buildAgentsSdkWorkerUploadMetadata(
       text: personalAgent.launchBrief
     });
   }
+  appendMissingNamedBindings(bindings, input.rawWorker.metadata.bindings);
 
   return {
     main_module: moduleName,
@@ -707,6 +716,23 @@ function buildAgentsSdkWorkerUploadMetadata(
     },
     keep_bindings: ["secret_text", "secret_key"]
   };
+}
+
+function appendMissingNamedBindings(
+  target: Array<Record<string, unknown>>,
+  source: Array<Record<string, unknown>>
+): void {
+  const seen = new Set(
+    target
+      .map((binding) => (typeof binding.name === "string" ? binding.name : undefined))
+      .filter((name): name is string => Boolean(name))
+  );
+  for (const binding of source) {
+    const name = typeof binding.name === "string" ? binding.name : undefined;
+    if (!name || seen.has(name)) continue;
+    target.push(binding);
+    seen.add(name);
+  }
 }
 
 function contentTypeForPath(pathname: string): string {

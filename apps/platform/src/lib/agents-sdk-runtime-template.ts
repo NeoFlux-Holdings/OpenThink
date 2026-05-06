@@ -19,11 +19,16 @@ export interface AgentsSdkRuntimeFile {
   contents: string;
 }
 
-export function renderAgentsSdkPersonalAgentRuntime(input: {
+export interface AgentsSdkRuntimeRenderInput {
   request: DeploymentRequest;
   deploymentId: string;
   bindings: AgentsSdkRuntimeBindingPlan;
-}): AgentsSdkRuntimeFile[] {
+  sourceSha?: string;
+}
+
+export function renderAgentsSdkPersonalAgentRuntime(
+  input: AgentsSdkRuntimeRenderInput
+): AgentsSdkRuntimeFile[] {
   return [
     {
       path: "package.json",
@@ -35,7 +40,7 @@ export function renderAgentsSdkPersonalAgentRuntime(input: {
     },
     {
       path: "wrangler.jsonc",
-      contents: `${JSON.stringify(renderWranglerJsonc(input), null, 2)}\n`
+      contents: `${JSON.stringify(renderAgentsSdkWranglerJsonc(input), null, 2)}\n`
     },
     {
       path: "index.html",
@@ -112,11 +117,9 @@ function renderTsconfigJson(): Record<string, unknown> {
   };
 }
 
-function renderWranglerJsonc(input: {
-  request: DeploymentRequest;
-  deploymentId: string;
-  bindings: AgentsSdkRuntimeBindingPlan;
-}): Record<string, unknown> {
+export function renderAgentsSdkWranglerJsonc(
+  input: AgentsSdkRuntimeRenderInput
+): Record<string, unknown> {
   const personalAgent = normalizePersonalAgentConfig(input.request.personalAgent);
   return {
     name: input.bindings.scriptName,
@@ -171,7 +174,8 @@ function renderWranglerJsonc(input: {
       OPEN_THINK_DEFAULT_MODEL: input.request.defaultModel ?? "@cf/moonshotai/kimi-k2.6",
       OPEN_THINK_PERSONAL_AGENT_CONFIG: personalAgentPublicConfigBindingText(input.request.personalAgent),
       OPEN_THINK_TOOL_APPROVAL_POLICY: personalAgent.toolApprovalPolicy,
-      OPEN_THINK_CF_ACCOUNT_ID: input.request.cloudflareAccountId?.trim() ?? ""
+      OPEN_THINK_CF_ACCOUNT_ID: input.request.cloudflareAccountId?.trim() ?? "",
+      ...(input.sourceSha ? { OPEN_THINK_SOURCE_SHA: input.sourceSha } : {})
     }
   };
 }
