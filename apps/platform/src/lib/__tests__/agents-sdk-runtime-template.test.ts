@@ -93,6 +93,10 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("stickToBottomRef");
     expect(client).toContain("onScroll={onMessageListScroll}");
     expect(client).toContain("isProtocolRecoveryError");
+    expect(client).toContain("indexActiveApprovalIds");
+    expect(client).toContain("visibleMessages");
+    expect(client).toContain("messageHasRenderableParts");
+    expect(client).toContain('displayState !== "expired-approval"');
     expect(client).toContain("function onRetry()");
     expect(client).toContain('if (toolCall.toolName !== "getUserTimezone") return;');
     expect(client).not.toContain("Unhandled browser tool");
@@ -122,9 +126,11 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(source).toContain("confirmCloudflareOperation: tool(");
     expect(source).toContain("needsApproval: async () => true");
     expect(source).toContain("waitForMcpConnections = { timeout: 10_000 }");
-    expect(source).toContain("pruneMessages({");
+    expect(source).toContain("prepareModelMessages(this.messages)");
+    expect(source).toContain("sanitizeMessagesForModel");
+    expect(source).toContain("activeApprovalContinuationIndex");
     expect(source).toContain("ignoreIncompleteToolCalls: true");
-    expect(source).toContain('toolCalls: "before-last-message"');
+    expect(source).not.toContain("pruneMessages");
     expect(source).toContain("stopWhen: stepCountIs(5)");
     expect(source).toContain("toUIMessageStreamResponse({ sendReasoning: false })");
     expect(source).toContain('transport: "websocket"');

@@ -888,7 +888,8 @@ function Chat() {
   const alwaysAllowedToolCount = alwaysAllowedTools.size;
   const activityLabel = busy ? (isToolContinuation ? "Continuing tool" : "Streaming") : "Idle";
   const approvalToolCallIds = useMemo(() => indexActivePendingApprovals(messages), [messages]);
-  const activeApprovalIds = useMemo(() => new Set(approvalToolCallIds.keys()), [approvalToolCallIds]);
+  const activeApprovalIds = useMemo(() => indexActiveApprovalIds(messages), [messages]);
+  const visibleMessages = useMemo(() => messages.filter(messageHasRenderableParts), [messages]);
   const pendingApprovalCount = approvalToolCallIds.size;
   const approvalErrorMessage = formatChatErrorMessage(error);
   const retryIsSafe = !isProtocolRecoveryError(error);
@@ -1042,12 +1043,12 @@ function Chat() {
           </div>
 
           <div className="message-list" aria-live="polite" onScroll={onMessageListScroll} ref={messageListRef} role="log">
-            {messages.length === 0 ? (
+            {visibleMessages.length === 0 ? (
               <div className="empty-state">
                 Ask for a plan, a Cloudflare operation, a memory lookup, or your browser timezone.
               </div>
             ) : (
-              messages.map((message) => (
+              visibleMessages.map((message) => (
                 <Message
                   activeApprovalIds={activeApprovalIds}
                   approveToolAlways={approveToolAlways}
@@ -1194,9 +1195,11 @@ function MessagePart({
     const input = getToolInput(part);
     const output = getToolOutput(part);
     const approval = getToolApproval(part);
+    const isApprovalState = state === "waiting-approval" || state === "approved" || state === "approval-responded";
     const approvalIsActive = Boolean(approval?.id && activeApprovalIds.has(approval.id));
-    const displayState = state === "waiting-approval" && !approvalIsActive ? "expired-approval" : state;
+    const displayState = isApprovalState && !approvalIsActive ? "expired-approval" : state;
     const canRespondToApproval = Boolean(approval?.id && toolCallId && approvalIsActive);
+    const showToolPayload = displayState !== "expired-approval";
 
     return (
       <div className="tool-part" data-state={displayState}>
@@ -1204,7 +1207,7 @@ function MessagePart({
           <strong>{toolName}</strong>
           <span className="pill" data-state={displayState}>{displayState}</span>
         </div>
-        {input ? <pre>{formatJson(input)}</pre> : null}
+        {input && showToolPayload ? <pre>{formatJson(input)}</pre> : null}
         {state === "waiting-approval" && approvalIsActive ? (
           <>
             <p className="tool-note">
@@ -1240,13 +1243,13 @@ function MessagePart({
             </div>
           </>
         ) : null}
-        {state === "waiting-approval" && !approvalIsActive ? (
+        {isApprovalState && !approvalIsActive ? (
           <p className="tool-note">
             This approval belongs to an older turn and is no longer actionable. Send a new request to run it again.
           </p>
         ) : null}
         {state === "denied" ? <p className="tool-note">Rejected by owner.</p> : null}
-        {output ? (
+        {output && showToolPayload ? (
           <>
             <span className="tool-output-label">Output</span>
             <pre>{formatJson(output)}</pre>
@@ -1316,6 +1319,10 @@ function formatJson(value: unknown) {
   return JSON.stringify(value, null, 2);
 }
 
+function messageHasRenderableParts(message: UIMessage) {
+  return message.parts.some((part) => isTextUIPart(part) || isToolUIPart(part));
+}
+
 type McpServerState = {
   connectionState?: string;
   state?: string;
@@ -1331,6 +1338,12 @@ function formatChatErrorMessage(error: Error | undefined) {
   if (error.message.startsWith("Tool result is missing for tool call")) {
     return "A previous tool call is incomplete in the saved history. It has been isolated; send the request again if needed.";
   }
+  if (
+    error.message.includes("not found for approval request") ||
+    error.message.includes("Tool approval response references unknown approvalId")
+  ) {
+    return "A stale tool approval was left in saved history. It has been isolated; send a new request to run the operation again.";
+  }
   if (error.message.includes("for missing text part") || error.message.includes("for missing reasoning part")) {
     return "The stream sent an out-of-order protocol chunk. Dismiss this notice and send the next message when ready.";
   }
@@ -1341,6 +1354,8 @@ function isProtocolRecoveryError(error: Error | undefined) {
   const message = error?.message ?? "";
   return (
     message.startsWith("Tool result is missing for tool call") ||
+    message.includes("not found for approval request") ||
+    message.includes("Tool approval response references unknown approvalId") ||
     message.includes("for missing text part") ||
     message.includes("for missing reasoning part") ||
     message.includes("Cannot read properties of undefined (reading 'state')")
@@ -1360,6 +1375,27 @@ function indexActivePendingApprovals(messages: UIMessage[]) {
       const approval = getToolApproval(part);
       const toolCallId = getToolCallId(part);
       if (approval?.id && toolCallId) index.set(approval.id, toolCallId);
+    }
+
+    return index;
+  }
+  return index;
+}
+
+function indexActiveApprovalIds(messages: UIMessage[]) {
+  const index = new Set<string>();
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (message.role === "user") return index;
+    if (message.role !== "assistant") continue;
+
+    for (const part of message.parts) {
+      if (!isToolUIPart(part)) continue;
+      const state = getToolPartState(part);
+      if (state !== "waiting-approval" && state !== "approved" && state !== "approval-responded") continue;
+
+      const approval = getToolApproval(part);
+      if (approval?.id) index.add(approval.id);
     }
 
     return index;
@@ -1415,12 +1451,13 @@ import type { OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { routeAgentRequest, type AgentContext } from "agents";
 import {
   convertToModelMessages,
-  pruneMessages,
+  isToolUIPart,
   stepCountIs,
   streamText,
   tool,
   type StreamTextOnFinishCallback,
-  type ToolSet
+  type ToolSet,
+  type UIMessage
 } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
@@ -1454,6 +1491,52 @@ const generatedPublicPersonalAgentConfig = ${publicPersonalAgentLiteral};
 const generatedToolApprovalPolicy = ${toolApprovalPolicy};
 const docsMcpServerUrl = "https://docs.mcp.cloudflare.com/mcp";
 const cloudflareMcpServerUrl = "https://mcp.cloudflare.com/mcp";
+
+async function prepareModelMessages(messages: UIMessage[]) {
+  return convertToModelMessages(sanitizeMessagesForModel(messages), { ignoreIncompleteToolCalls: true });
+}
+
+function sanitizeMessagesForModel(messages: UIMessage[]): UIMessage[] {
+  const activeApprovalIndex = activeApprovalContinuationIndex(messages);
+
+  return messages
+    .map((message, messageIndex) => {
+      const shouldKeepToolParts = messageIndex === activeApprovalIndex;
+      if (shouldKeepToolParts || !message.parts.some(isToolUIPart)) return message;
+
+      return {
+        ...message,
+        parts: message.parts.filter((part) => !isToolUIPart(part))
+      } as UIMessage;
+    })
+    .filter((message) => message.role === "user" || message.parts.length > 0);
+}
+
+function activeApprovalContinuationIndex(messages: UIMessage[]) {
+  const lastMessageIndex = messages.length - 1;
+  const lastMessage = messages[lastMessageIndex];
+  if (!lastMessage || lastMessage.role !== "assistant") return -1;
+
+  const toolParts = lastMessage.parts.filter(isToolUIPart);
+  const hasApprovalResponse = toolParts.some((part) => {
+    const state = uiToolState(part);
+    return state === "approval-responded" || state === "approved";
+  });
+  if (!hasApprovalResponse) return -1;
+
+  const allApprovalsSettled = toolParts.every((part) => {
+    const state = uiToolState(part);
+    return state === "approval-responded" || state === "approved" || state === "output-available" || state === "output-error";
+  });
+
+  return allApprovalsSettled ? lastMessageIndex : -1;
+}
+
+function uiToolState(part: UIMessage["parts"][number]) {
+  return typeof (part as { state?: unknown }).state === "string"
+    ? String((part as { state: string }).state)
+    : "";
+}
 
 export class PersonalChatAgent extends AIChatAgent<RuntimeEnv> {
   maxPersistedMessages = 200;
@@ -1558,10 +1641,7 @@ export class PersonalChatAgent extends AIChatAgent<RuntimeEnv> {
         "Deployment id: " + (env.OPEN_THINK_DEPLOYMENT_ID ?? generatedDeploymentId),
         "Cloudflare account id: " + ((env.OPEN_THINK_CF_ACCOUNT_ID ?? generatedCloudflareAccountId) || "not configured")
       ].join("\\n"),
-      messages: pruneMessages({
-        messages: await convertToModelMessages(this.messages, { ignoreIncompleteToolCalls: true }),
-        toolCalls: "before-last-message"
-      }),
+      messages: await prepareModelMessages(this.messages),
       tools: {
         ...this.mcpToolsWithApprovalPolicy(),
         ...this.builtinTools()
