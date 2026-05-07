@@ -82,7 +82,10 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("<Streamdown controls={false}>");
     expect(client).toContain("<MarkdownRenderer>{part.text}</MarkdownRenderer>");
     expect(client).toContain('useAgentChat({');
-    expect(client).toContain('type: "cf_agent_tool_approval"');
+    expect(client).toContain("autoContinueAfterToolResult: false");
+    expect(client).toContain("resume: false");
+    expect(client).toContain("sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses");
+    expect(client).toContain("addToolApprovalResponse({ id: approvalId, approved })");
     expect(client).toContain("indexPendingApprovals");
     expect(client).toContain("function onRetry()");
     expect(client).toContain('if (toolCall.toolName !== "getUserTimezone") return;');

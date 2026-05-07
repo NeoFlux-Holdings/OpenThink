@@ -806,6 +806,7 @@ import {
   getToolName,
   isTextUIPart,
   isToolUIPart,
+  lastAssistantMessageIsCompleteWithApprovalResponses,
   type UIMessage
 } from "ai";
 import "./client.css";
@@ -846,7 +847,7 @@ function Chat() {
     stop,
     regenerate,
     clearError,
-    setMessages,
+    addToolApprovalResponse,
     status,
     error,
     isStreaming,
@@ -854,6 +855,9 @@ function Chat() {
     isToolContinuation
   } = useAgentChat({
     agent,
+    autoContinueAfterToolResult: false,
+    resume: false,
+    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
     onToolCall: async ({ toolCall, addToolOutput }) => {
       if (toolCall.toolName !== "getUserTimezone") return;
 
@@ -899,24 +903,16 @@ function Chat() {
 
       clearError();
       try {
-        agent.send(
-          JSON.stringify({
-            type: "cf_agent_tool_approval",
-            toolCallId,
-            approved,
-            autoContinue: true
-          })
-        );
-      } catch (sendError) {
-        console.warn("[open-think] Failed to send tool approval.", sendError);
+        void Promise.resolve(addToolApprovalResponse({ id: approvalId, approved })).catch((approvalError: unknown) => {
+          console.warn("[open-think] Failed to send tool approval.", approvalError);
+        });
+      } catch (approvalError) {
+        console.warn("[open-think] Failed to send tool approval.", approvalError);
         return false;
       }
-      setMessages((previousMessages) =>
-        applyToolApprovalResponse(previousMessages, approvalId, approved)
-      );
       return true;
     },
-    [agent, approvalToolCallIds, clearError, setMessages]
+    [addToolApprovalResponse, agent.readyState, approvalToolCallIds, clearError]
   );
 
   useEffect(() => {
@@ -1310,31 +1306,6 @@ function indexPendingApprovals(messages: UIMessage[]) {
     }
   }
   return index;
-}
-
-function applyToolApprovalResponse(messages: UIMessage[], approvalId: string, approved: boolean): UIMessage[] {
-  let changed = false;
-  const nextMessages = messages.map((message) => {
-    let messageChanged = false;
-    const parts = message.parts.map((part) => {
-      if (!isToolUIPart(part) || getToolApproval(part)?.id !== approvalId) return part;
-
-      changed = true;
-      messageChanged = true;
-      return {
-        ...part,
-        approval: {
-          ...getToolApproval(part),
-          approved
-        },
-        state: approved ? "approval-responded" : "output-denied"
-      } as UIMessage["parts"][number];
-    });
-
-    return messageChanged ? { ...message, parts } : message;
-  });
-
-  return changed ? nextMessages : messages;
 }
 
 function isMcpReady(server: McpServerState) {
