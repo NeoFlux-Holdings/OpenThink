@@ -59,9 +59,10 @@ describe("createGeneratedRuntimePublisher", () => {
 
   it("builds the Agents SDK runtime locally and prepares asset-backed upload metadata", async () => {
     let uploadedAssets = 0;
-    let uploadedModule:
-      | Parameters<GeneratedRuntimeCloudflareClient["uploadWorkerModule"]>[0]
-      | undefined;
+    const uploadedModules: Array<
+      Parameters<GeneratedRuntimeCloudflareClient["uploadWorkerModule"]>[0]
+    > = [];
+    let failNextMigrationPrecondition = false;
     const localClient: GeneratedRuntimeCloudflareClient = {
       async uploadWorkerAssets(input) {
         uploadedAssets = input.assets.length;
@@ -69,7 +70,13 @@ describe("createGeneratedRuntimePublisher", () => {
         return { jwt: "asset-jwt" };
       },
       async uploadWorkerModule(input) {
-        uploadedModule = input;
+        uploadedModules.push(input);
+        if (failNextMigrationPrecondition && input.metadata.migrations) {
+          failNextMigrationPrecondition = false;
+          throw new Error(
+            "Upload Worker script failed: Actor migration tag precondition failed, got tag '' when expected tag is 'agent-local-build-test-agents-sdk-v1'."
+          );
+        }
       },
       async ensureArtifactRepoWithWriteToken() {
         return {
@@ -125,8 +132,10 @@ describe("createGeneratedRuntimePublisher", () => {
     };
 
     const result = await publisher.publish(input);
+    const uploadedModule = uploadedModules.at(-1);
 
     expect(result.mode).toBe("agents-sdk-local-build");
+    expect(result.durableObjectMigrationTag).toBe("agent-local-build-test-agents-sdk-v1");
     expect(uploadedAssets).toBeGreaterThan(0);
     expect(uploadedModule?.moduleName.endsWith(".js")).toBe(true);
     expect(uploadedModule?.moduleCode).toContain("PersonalChatAgent");
@@ -156,5 +165,17 @@ describe("createGeneratedRuntimePublisher", () => {
         })
       ])
     );
+
+    await publisher.publish({
+      ...input,
+      existingDurableObjectMigrationTag: "agent-local-build-test-agents-sdk-v1"
+    });
+    expect(uploadedModules.at(-1)?.metadata.migrations).toBeUndefined();
+
+    failNextMigrationPrecondition = true;
+    await publisher.publish(input);
+    const retryUploads = uploadedModules.slice(-2);
+    expect(retryUploads[0]?.metadata.migrations).toBeDefined();
+    expect(retryUploads[1]?.metadata.migrations).toBeUndefined();
   }, 120_000);
 });

@@ -7,6 +7,7 @@ import {
 } from "./cloudflare-api";
 import type { DeploymentRecord } from "./d1";
 import type { StarterTemplate } from "./deployment-engine";
+import { agentsSdkDurableObjectMigrationTag } from "./generated-runtime-publisher";
 import { fingerprintToken } from "./security";
 
 export interface CloudflareDeploymentDiscovery {
@@ -250,6 +251,17 @@ function resourcePlanFromSettings(input: {
         requiresPaidPlan: true
       },
       updatedAt: input.updatedAt
+    };
+  }
+
+  if (readBinding(input.bindings, "PersonalChatAgent")) {
+    resourcePlan.generatedRuntime = {
+      mode: "agents-sdk-local-build",
+      scriptName: input.scriptName,
+      uploadedBy: "workers-scripts-api",
+      durableObjectMigrationTag: agentsSdkDurableObjectMigrationTag(
+        readBindingText(input.bindings, "OPEN_THINK_DEPLOYMENT_ID") ?? input.scriptName
+      )
     };
   }
 

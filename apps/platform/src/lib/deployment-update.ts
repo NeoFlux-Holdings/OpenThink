@@ -5,6 +5,7 @@ import {
   type AgentsSdkRuntimeBindingPlan
 } from "./agents-sdk-runtime-template";
 import {
+  agentsSdkDurableObjectMigrationTag,
   createGeneratedRuntimePublisher,
   type GeneratedRuntimePublishInput,
   type GeneratedRuntimePublishResult
@@ -784,12 +785,17 @@ async function uploadDeploymentRuntime(input: {
     requestOptions.personalAgentOverride
   );
   const bindings = runtimeBindingsFromRecord(input.deployment, input.target);
+  const existingMigrationTag = existingAgentsSdkDurableObjectMigrationTag(
+    input.deployment.resourcePlan,
+    input.deployment.id
+  );
   const publishInput: GeneratedRuntimePublishInput = {
     request,
     deploymentId: input.deployment.id,
     accountId: input.target.accountId,
     scriptName: input.target.scriptName,
     ...(input.sourceSha ? { sourceSha: input.sourceSha } : {}),
+    ...(existingMigrationTag ? { existingDurableObjectMigrationTag: existingMigrationTag } : {}),
     bindings,
     rawWorker: {
       moduleName: "worker.js",
@@ -861,6 +867,18 @@ function generatedRuntimeUpdateWarnings(
 
 function generatedRuntimeMode(resourcePlan: Record<string, unknown>): string | undefined {
   return readString(readRecord(resourcePlan.generatedRuntime)?.mode);
+}
+
+function existingAgentsSdkDurableObjectMigrationTag(
+  resourcePlan: Record<string, unknown>,
+  deploymentId: string
+): string | undefined {
+  const generatedRuntime = readRecord(resourcePlan.generatedRuntime);
+  const storedTag = readString(generatedRuntime?.durableObjectMigrationTag);
+  if (storedTag) return storedTag;
+  return generatedRuntimeMode(resourcePlan)?.startsWith("agents-sdk")
+    ? agentsSdkDurableObjectMigrationTag(deploymentId)
+    : undefined;
 }
 
 function isRawGeneratedRuntimeRequested(env: Record<string, unknown>): boolean {

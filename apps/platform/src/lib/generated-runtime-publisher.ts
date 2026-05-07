@@ -28,6 +28,7 @@ export interface GeneratedRuntimePublishResult {
     | "workers-scripts-api"
     | "container-build-endpoint"
     | "local-wrangler-build";
+  durableObjectMigrationTag?: string;
   artifact?: {
     namespace: string;
     repo: string;
@@ -49,6 +50,7 @@ export interface GeneratedRuntimePublishInput {
   sourceSha?: string;
   apiToken?: string;
   scriptName: string;
+  existingDurableObjectMigrationTag?: string;
   bindings: AgentsSdkRuntimeBindingPlan;
   rawWorker: {
     moduleName: string;
@@ -253,7 +255,9 @@ export class LocalAgentsSdkBuildPublisher implements GeneratedRuntimePublisher {
         assetUpload.jwt
       );
 
-      await this.client.uploadWorkerModule({
+      await uploadAgentsSdkWorkerModuleWithMigrationRetry({
+        client: this.client,
+        deploymentId: input.deploymentId,
         scriptName: input.scriptName,
         moduleName: bundle.moduleName,
         moduleCode: bundle.moduleCode,
@@ -264,6 +268,7 @@ export class LocalAgentsSdkBuildPublisher implements GeneratedRuntimePublisher {
         mode: "agents-sdk-local-build",
         scriptName: input.scriptName,
         uploadedBy: "local-wrangler-build",
+        durableObjectMigrationTag: agentsSdkDurableObjectMigrationTag(input.deploymentId),
         build: {
           status: "uploaded",
           details: {
@@ -358,6 +363,7 @@ export class AgentsSdkContainerBuildPublisher implements GeneratedRuntimePublish
       mode: "agents-sdk-container-build",
       scriptName: input.scriptName,
       uploadedBy: "container-build-endpoint",
+      durableObjectMigrationTag: agentsSdkDurableObjectMigrationTag(input.deploymentId),
       artifact: {
         namespace: this.options.artifactNamespace,
         repo: artifact.name,
@@ -590,6 +596,7 @@ function buildAgentsSdkWorkerUploadMetadata(
   assetsJwt: string
 ): WorkerUploadMetadata {
   const personalAgent = normalizePersonalAgentConfig(input.request.personalAgent);
+  const migrationTag = agentsSdkDurableObjectMigrationTag(input.deploymentId);
   const sourceSha =
     input.sourceSha ??
     readEnvString(process.env, "OPEN_THINK_SOURCE_SHA") ??
@@ -707,10 +714,17 @@ function buildAgentsSdkWorkerUploadMetadata(
     compatibility_date: "2026-05-01",
     compatibility_flags: ["nodejs_compat"],
     bindings,
-    migrations: {
-      new_tag: `${safePathSegment(input.deploymentId)}-agents-sdk-v1`,
-      new_sqlite_classes: ["PersonalChatAgent"]
-    },
+    ...(input.existingDurableObjectMigrationTag === migrationTag
+      ? {}
+      : {
+          migrations: {
+            ...(input.existingDurableObjectMigrationTag
+              ? { old_tag: input.existingDurableObjectMigrationTag }
+              : {}),
+            new_tag: migrationTag,
+            new_sqlite_classes: ["PersonalChatAgent"]
+          }
+        }),
     assets: {
       jwt: assetsJwt
     },
@@ -735,6 +749,50 @@ function appendMissingNamedBindings(
   }
 }
 
+async function uploadAgentsSdkWorkerModuleWithMigrationRetry(input: {
+  client: GeneratedRuntimeCloudflareClient;
+  deploymentId: string;
+  scriptName: string;
+  moduleName: string;
+  moduleCode: string;
+  metadata: WorkerUploadMetadata;
+}): Promise<void> {
+  try {
+    await input.client.uploadWorkerModule({
+      scriptName: input.scriptName,
+      moduleName: input.moduleName,
+      moduleCode: input.moduleCode,
+      metadata: input.metadata
+    });
+    return;
+  } catch (error) {
+    const expectedMigrationTag = migrationTagExpectedByCloudflare(error);
+    if (
+      !input.metadata.migrations ||
+      expectedMigrationTag !== agentsSdkDurableObjectMigrationTag(input.deploymentId)
+    ) {
+      throw error;
+    }
+
+    const retryMetadata = { ...input.metadata };
+    delete retryMetadata.migrations;
+    await input.client.uploadWorkerModule({
+      scriptName: input.scriptName,
+      moduleName: input.moduleName,
+      moduleCode: input.moduleCode,
+      metadata: retryMetadata
+    });
+  }
+}
+
+function migrationTagExpectedByCloudflare(error: unknown): string | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  const match = /Actor migration tag precondition failed, got tag '[^']*' when expected tag is '([^']+)'/.exec(
+    message
+  );
+  return match?.[1];
+}
+
 function contentTypeForPath(pathname: string): string {
   if (pathname.endsWith(".html")) return "text/html; charset=utf-8";
   if (pathname.endsWith(".css")) return "text/css; charset=utf-8";
@@ -755,4 +813,8 @@ function safePathSegment(value: string): string {
       .replace(/^-+|-+$/g, "")
       .slice(0, 80) || "runtime"
   );
+}
+
+export function agentsSdkDurableObjectMigrationTag(deploymentId: string): string {
+  return `${safePathSegment(deploymentId)}-agents-sdk-v1`;
 }
