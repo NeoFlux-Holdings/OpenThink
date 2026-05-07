@@ -246,12 +246,14 @@ function renderClientCss(): string {
 
 html {
   min-width: 320px;
+  min-height: 100%;
   background: var(--bg);
 }
 
 body {
   margin: 0;
   min-height: 100dvh;
+  overflow: hidden;
   color: var(--ink);
   font-family: var(--sans);
   background:
@@ -262,7 +264,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -278,7 +281,9 @@ button {
 .app {
   display: grid;
   grid-template-rows: auto 1fr;
-  min-height: 100dvh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .topbar {
@@ -375,9 +380,11 @@ button {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(270px, 340px);
   gap: 16px;
+  min-height: 0;
+  height: 100%;
   width: min(1440px, calc(100% - 28px));
   margin: 0 auto;
-  padding: 20px 0 32px;
+  padding: 16px 0;
 }
 
 .chat-panel,
@@ -392,7 +399,8 @@ button {
 .chat-panel {
   display: grid;
   grid-template-rows: auto 1fr auto;
-  min-height: calc(100dvh - 116px);
+  min-height: 0;
+  overflow: hidden;
 }
 
 .panel-header {
@@ -420,8 +428,11 @@ button {
   display: grid;
   gap: 12px;
   align-content: start;
+  min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 16px;
+  scrollbar-gutter: stable;
   scroll-behavior: smooth;
 }
 
@@ -465,6 +476,10 @@ button {
 
 .text-part :where(p, ul, ol, blockquote, pre, table, h1, h2, h3, h4, hr) {
   margin: 0;
+}
+
+.text-part :where([data-streamdown]) {
+  max-width: 100%;
 }
 
 .text-part :where(h1, h2, h3, h4) {
@@ -557,11 +572,13 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
 }
 
 .tool-heading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-family: var(--mono);
   font-size: 0.82rem;
 }
@@ -570,6 +587,10 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.tool-actions .button {
+  min-height: 36px;
 }
 
 .tool-note {
@@ -606,17 +627,20 @@ pre {
   padding: 14px;
 }
 
-.composer input {
+.composer textarea {
   min-height: 44px;
+  max-height: 144px;
   width: 100%;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
-  padding: 0 12px;
+  padding: 11px 12px;
   color: var(--ink);
   background: var(--surface-strong);
+  line-height: 1.38;
+  resize: vertical;
 }
 
-.composer input:disabled {
+.composer textarea:disabled {
   color: var(--muted);
   background: rgba(255, 252, 245, 0.6);
 }
@@ -666,6 +690,8 @@ pre {
 .side-panel {
   display: grid;
   align-content: start;
+  max-height: 100%;
+  overflow: auto;
 }
 
 .side-body {
@@ -711,12 +737,28 @@ pre {
 }
 
 @media (max-width: 900px) {
+  body {
+    overflow: auto;
+  }
+
+  .app {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
   .workspace {
     grid-template-columns: 1fr;
+    height: auto;
   }
 
   .chat-panel {
     min-height: calc(100dvh - 112px);
+  }
+
+  .side-panel {
+    max-height: none;
+    overflow: visible;
   }
 }
 
@@ -749,7 +791,7 @@ function renderClientTsx(input: {
     toolApprovalPolicy: personalAgent.toolApprovalPolicy
   };
 
-  return `import { FormEvent, Suspense, lazy, useEffect, useRef, useState } from "react";
+  return `import { FormEvent, KeyboardEvent, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
 import {
@@ -772,7 +814,7 @@ const MarkdownRenderer = lazy(async () => {
   const { Streamdown } = await import("streamdown");
   return {
     default: function MarkdownRenderer({ children }: { children: string }) {
-      return <Streamdown>{children}</Streamdown>;
+      return <Streamdown controls={false}>{children}</Streamdown>;
     }
   };
 });
@@ -804,7 +846,7 @@ function Chat() {
     stop,
     regenerate,
     clearError,
-    addToolApprovalResponse,
+    setMessages,
     status,
     error,
     isStreaming,
@@ -830,10 +872,52 @@ function Chat() {
   const mcpReadyCount = mcpServerValues.filter((server) => isMcpReady(server)).length;
   const alwaysAllowedToolCount = alwaysAllowedTools.size;
   const activityLabel = busy ? (isToolContinuation ? "Continuing tool" : "Streaming") : "Idle";
+  const approvalToolCallIds = useMemo(() => indexPendingApprovals(messages), [messages]);
+  const approvalErrorMessage =
+    error?.message ?? null;
+  const canRetry =
+    connected &&
+    !busy &&
+    pendingApprovalCount === 0 &&
+    messages.some((message) => message.role === "user");
 
   useEffect(() => {
     messageListEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages, status, isStreaming, isServerStreaming]);
+
+  const respondToToolApproval = useCallback(
+    (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => {
+      if (!approvalId || !toolCallId) return false;
+      if (approvalToolCallIds.get(approvalId) !== toolCallId) {
+        console.warn("[open-think] Ignoring stale tool approval " + approvalId + ".");
+        return false;
+      }
+      if (agent.readyState !== WebSocket.OPEN) {
+        console.warn("[open-think] Cannot send tool approval while the agent socket is not connected.");
+        return false;
+      }
+
+      clearError();
+      try {
+        agent.send(
+          JSON.stringify({
+            type: "cf_agent_tool_approval",
+            toolCallId,
+            approved,
+            autoContinue: true
+          })
+        );
+      } catch (sendError) {
+        console.warn("[open-think] Failed to send tool approval.", sendError);
+        return false;
+      }
+      setMessages((previousMessages) =>
+        applyToolApprovalResponse(previousMessages, approvalId, approved)
+      );
+      return true;
+    },
+    [agent, approvalToolCallIds, clearError, setMessages]
+  );
 
   useEffect(() => {
     for (const message of messages) {
@@ -841,19 +925,21 @@ function Chat() {
         if (!isToolUIPart(part) || getToolPartState(part) !== "waiting-approval") continue;
 
         const approval = getToolApproval(part);
+        const toolCallId = getToolCallId(part);
         const toolName = getToolName(part);
         if (!approval?.id || !alwaysAllowedTools.has(toolApprovalPreferenceKey(toolName))) continue;
         if (autoApprovedApprovalIdsRef.current.has(approval.id)) continue;
 
-        autoApprovedApprovalIdsRef.current.add(approval.id);
-        addToolApprovalResponse({ id: approval.id, approved: true });
+        if (respondToToolApproval(approval.id, toolCallId, true)) {
+          autoApprovedApprovalIdsRef.current.add(approval.id);
+        }
       }
     }
-  }, [addToolApprovalResponse, alwaysAllowedTools, messages]);
+  }, [alwaysAllowedTools, messages, respondToToolApproval]);
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const input = event.currentTarget.elements.namedItem("message") as HTMLInputElement | null;
+    const input = event.currentTarget.elements.namedItem("message") as HTMLTextAreaElement | null;
     const text = input?.value.trim();
     if (!text || !connected || busy) return;
     sendMessage({ text });
@@ -868,7 +954,7 @@ function Chat() {
   }
 
   function onRetry() {
-    if (!connected || busy || messages.length === 0) return;
+    if (!canRetry) return;
     clearError();
     void Promise.resolve(regenerate()).catch((retryError: unknown) => {
       console.error("[useAgentChat] Retry failed", retryError);
@@ -887,9 +973,17 @@ function Chat() {
     });
 
     if (approvalId && !autoApprovedApprovalIdsRef.current.has(approvalId)) {
-      autoApprovedApprovalIdsRef.current.add(approvalId);
-      addToolApprovalResponse({ id: approvalId, approved: true });
+      const toolCallId = approvalToolCallIds.get(approvalId);
+      if (respondToToolApproval(approvalId, toolCallId, true)) {
+        autoApprovedApprovalIdsRef.current.add(approvalId);
+      }
     }
+  }
+
+  function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
   }
 
   function onClearToolAllowlist() {
@@ -933,24 +1027,24 @@ function Chat() {
             ) : (
               messages.map((message) => (
                 <Message
-                  addToolApprovalResponse={addToolApprovalResponse}
                   approveToolAlways={approveToolAlways}
                   key={message.id}
                   message={message}
+                  respondToToolApproval={respondToToolApproval}
                 />
               ))
             )}
-            {error ? (
+            {approvalErrorMessage ? (
               <div className="error" role="alert">
-                <span>{error.message}</span>
+                <span>{approvalErrorMessage}</span>
                 <div className="button-row">
                   <button className="button button-compact" onClick={clearError} type="button">
                     Dismiss
                   </button>
-                  {messages.length > 0 ? (
+                  {messages.length > 0 && pendingApprovalCount === 0 ? (
                     <button
                       className="button button-compact"
-                      disabled={!connected || busy}
+                      disabled={!canRetry}
                       onClick={onRetry}
                       type="button"
                     >
@@ -964,12 +1058,14 @@ function Chat() {
           </div>
 
           <form className="composer" onSubmit={onSubmit}>
-            <input
+            <textarea
               aria-label="Message"
               autoComplete="off"
               disabled={!connected}
               name="message"
+              onKeyDown={onComposerKeyDown}
               placeholder={connected ? "Ask your agent to inspect, remember, plan, or operate..." : "Reconnect to continue..."}
+              rows={1}
             />
             <button className="button button-primary" disabled={!connected || busy} type="submit">
               {busy ? "Working" : "Send"}
@@ -1022,23 +1118,23 @@ function Chat() {
 }
 
 function Message({
-  addToolApprovalResponse,
   approveToolAlways,
-  message
+  message,
+  respondToToolApproval
 }: {
-  addToolApprovalResponse: (input: { id: string; approved: boolean }) => void;
   approveToolAlways: (toolName: string, approvalId?: string) => void;
   message: UIMessage;
+  respondToToolApproval: (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => boolean;
 }) {
   return (
     <article className="message" data-role={message.role}>
       <small>{message.role}</small>
       {message.parts.map((part, index) => (
         <MessagePart
-          addToolApprovalResponse={addToolApprovalResponse}
           approveToolAlways={approveToolAlways}
           key={partKey(part, index)}
           part={part}
+          respondToToolApproval={respondToToolApproval}
         />
       ))}
     </article>
@@ -1046,13 +1142,13 @@ function Message({
 }
 
 function MessagePart({
-  addToolApprovalResponse,
   approveToolAlways,
-  part
+  part,
+  respondToToolApproval
 }: {
-  addToolApprovalResponse: (input: { id: string; approved: boolean }) => void;
   approveToolAlways: (toolName: string, approvalId?: string) => void;
   part: UIMessage["parts"][number];
+  respondToToolApproval: (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => boolean;
 }) {
   if (isTextUIPart(part)) {
     return (
@@ -1071,6 +1167,7 @@ function MessagePart({
     const input = getToolInput(part);
     const output = getToolOutput(part);
     const approval = getToolApproval(part);
+    const canRespondToApproval = Boolean(approval?.id && toolCallId);
 
     return (
       <div className="tool-part" data-state={state}>
@@ -1089,15 +1186,15 @@ function MessagePart({
             <div className="tool-actions">
               <button
                 className="button button-primary"
-                disabled={!approval?.id}
-                onClick={() => approval?.id && addToolApprovalResponse({ id: approval.id, approved: true })}
+                disabled={!canRespondToApproval}
+                onClick={() => respondToToolApproval(approval?.id, toolCallId, true)}
                 type="button"
               >
                 Approve once
               </button>
               <button
                 className="button"
-                disabled={!approval?.id}
+                disabled={!canRespondToApproval}
                 onClick={() => approveToolAlways(toolName, approval?.id)}
                 type="button"
               >
@@ -1105,8 +1202,8 @@ function MessagePart({
               </button>
               <button
                 className="button"
-                disabled={!approval?.id}
-                onClick={() => approval?.id && addToolApprovalResponse({ id: approval.id, approved: false })}
+                disabled={!canRespondToApproval}
+                onClick={() => respondToToolApproval(approval?.id, toolCallId, false)}
                 type="button"
               >
                 Reject
@@ -1201,6 +1298,45 @@ function countPendingApprovals(messages: UIMessage[]) {
   );
 }
 
+function indexPendingApprovals(messages: UIMessage[]) {
+  const index = new Map<string, string>();
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (!isToolUIPart(part) || getToolPartState(part) !== "waiting-approval") continue;
+
+      const approval = getToolApproval(part);
+      const toolCallId = getToolCallId(part);
+      if (approval?.id && toolCallId) index.set(approval.id, toolCallId);
+    }
+  }
+  return index;
+}
+
+function applyToolApprovalResponse(messages: UIMessage[], approvalId: string, approved: boolean): UIMessage[] {
+  let changed = false;
+  const nextMessages = messages.map((message) => {
+    let messageChanged = false;
+    const parts = message.parts.map((part) => {
+      if (!isToolUIPart(part) || getToolApproval(part)?.id !== approvalId) return part;
+
+      changed = true;
+      messageChanged = true;
+      return {
+        ...part,
+        approval: {
+          ...getToolApproval(part),
+          approved
+        },
+        state: approved ? "approval-responded" : "output-denied"
+      } as UIMessage["parts"][number];
+    });
+
+    return messageChanged ? { ...message, parts } : message;
+  });
+
+  return changed ? nextMessages : messages;
+}
+
 function isMcpReady(server: McpServerState) {
   const state = String(server.connectionState ?? server.state ?? "").toLowerCase();
   return state === "ready" || state === "connected";
@@ -1223,7 +1359,7 @@ function formatToolAllowlist(count: number) {
 }
 
 function partKey(part: UIMessage["parts"][number], index: number) {
-  if (isToolUIPart(part)) return getToolCallId(part);
+  if (isToolUIPart(part)) return getToolCallId(part) + ":" + String(index);
   return String(index);
 }
 

@@ -63,7 +63,7 @@ export function ChatWorkspace() {
                 )}
               </span>
               <span className="message-bubble markdown-message">
-                <Streamdown>{message.content}</Streamdown>
+                <Streamdown controls={false}>{message.content}</Streamdown>
               </span>
             </div>
           ))}
