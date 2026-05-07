@@ -86,7 +86,13 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("resume: false");
     expect(client).toContain("sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses");
     expect(client).toContain("addToolApprovalResponse({ id: approvalId, approved })");
-    expect(client).toContain("indexPendingApprovals");
+    expect(client).toContain("indexActivePendingApprovals");
+    expect(client).toContain("activeApprovalIds");
+    expect(client).toContain("expired-approval");
+    expect(client).toContain("isNearScrollBottom");
+    expect(client).toContain("stickToBottomRef");
+    expect(client).toContain("onScroll={onMessageListScroll}");
+    expect(client).toContain("isProtocolRecoveryError");
     expect(client).toContain("function onRetry()");
     expect(client).toContain('if (toolCall.toolName !== "getUserTimezone") return;');
     expect(client).not.toContain("Unhandled browser tool");
@@ -117,6 +123,8 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(source).toContain("needsApproval: async () => true");
     expect(source).toContain("waitForMcpConnections = { timeout: 10_000 }");
     expect(source).toContain("pruneMessages({");
+    expect(source).toContain("ignoreIncompleteToolCalls: true");
+    expect(source).toContain('toolCalls: "before-last-message"');
     expect(source).toContain("stopWhen: stepCountIs(5)");
     expect(source).toContain("toUIMessageStreamResponse({ sendReasoning: false })");
     expect(source).toContain('transport: "websocket"');

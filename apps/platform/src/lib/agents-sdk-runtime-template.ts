@@ -376,6 +376,12 @@ button {
   background: rgba(180, 59, 53, 0.08);
 }
 
+.pill[data-state="expired-approval"] {
+  border-color: var(--line-strong);
+  color: var(--muted);
+  background: rgba(21, 23, 22, 0.04);
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(270px, 340px);
@@ -433,7 +439,7 @@ button {
   overscroll-behavior: contain;
   padding: 16px;
   scrollbar-gutter: stable;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
 }
 
 .empty-state {
@@ -566,6 +572,11 @@ button {
 .tool-part[data-state="waiting-approval"] {
   border-color: rgba(223, 111, 33, 0.34);
   background: rgba(223, 111, 33, 0.08);
+}
+
+.tool-part[data-state="expired-approval"] {
+  border-color: var(--line-strong);
+  background: rgba(21, 23, 22, 0.035);
 }
 
 .tool-heading {
@@ -834,7 +845,8 @@ function Chat() {
   const [mcpServers, setMcpServers] = useState<Record<string, McpServerState>>({});
   const [alwaysAllowedTools, setAlwaysAllowedTools] = useState<Set<string>>(() => readAlwaysAllowedTools());
   const autoApprovedApprovalIdsRef = useRef<Set<string>>(new Set());
-  const messageListEndRef = useRef<HTMLDivElement | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
   const agent = useAgent({
     agent: "PersonalChatAgent",
     name: "default",
@@ -871,23 +883,33 @@ function Chat() {
   const connectionState = readyStateLabel(agent.readyState);
   const connected = agent.readyState === WebSocket.OPEN;
   const busy = status === "submitted" || status === "streaming" || isStreaming || isServerStreaming;
-  const pendingApprovalCount = countPendingApprovals(messages);
   const mcpServerValues = Object.values(mcpServers);
   const mcpReadyCount = mcpServerValues.filter((server) => isMcpReady(server)).length;
   const alwaysAllowedToolCount = alwaysAllowedTools.size;
   const activityLabel = busy ? (isToolContinuation ? "Continuing tool" : "Streaming") : "Idle";
-  const approvalToolCallIds = useMemo(() => indexPendingApprovals(messages), [messages]);
-  const approvalErrorMessage =
-    error?.message ?? null;
+  const approvalToolCallIds = useMemo(() => indexActivePendingApprovals(messages), [messages]);
+  const activeApprovalIds = useMemo(() => new Set(approvalToolCallIds.keys()), [approvalToolCallIds]);
+  const pendingApprovalCount = approvalToolCallIds.size;
+  const approvalErrorMessage = formatChatErrorMessage(error);
+  const retryIsSafe = !isProtocolRecoveryError(error);
   const canRetry =
     connected &&
     !busy &&
+    retryIsSafe &&
     pendingApprovalCount === 0 &&
     messages.some((message) => message.role === "user");
 
   useEffect(() => {
-    messageListEndRef.current?.scrollIntoView({ block: "end" });
+    const messageList = messageListRef.current;
+    if (!messageList || !stickToBottomRef.current) return;
+    messageList.scrollTop = messageList.scrollHeight;
   }, [messages, status, isStreaming, isServerStreaming]);
+
+  function onMessageListScroll() {
+    const messageList = messageListRef.current;
+    if (!messageList) return;
+    stickToBottomRef.current = isNearScrollBottom(messageList);
+  }
 
   const respondToToolApproval = useCallback(
     (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => {
@@ -923,7 +945,8 @@ function Chat() {
         const approval = getToolApproval(part);
         const toolCallId = getToolCallId(part);
         const toolName = getToolName(part);
-        if (!approval?.id || !alwaysAllowedTools.has(toolApprovalPreferenceKey(toolName))) continue;
+        if (!approval?.id || approvalToolCallIds.get(approval.id) !== toolCallId) continue;
+        if (!alwaysAllowedTools.has(toolApprovalPreferenceKey(toolName))) continue;
         if (autoApprovedApprovalIdsRef.current.has(approval.id)) continue;
 
         if (respondToToolApproval(approval.id, toolCallId, true)) {
@@ -931,13 +954,15 @@ function Chat() {
         }
       }
     }
-  }, [alwaysAllowedTools, messages, respondToToolApproval]);
+  }, [alwaysAllowedTools, approvalToolCallIds, messages, respondToToolApproval]);
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const input = event.currentTarget.elements.namedItem("message") as HTMLTextAreaElement | null;
     const text = input?.value.trim();
     if (!text || !connected || busy) return;
+    clearError();
+    stickToBottomRef.current = true;
     sendMessage({ text });
     if (input) input.value = "";
   }
@@ -952,6 +977,7 @@ function Chat() {
   function onRetry() {
     if (!canRetry) return;
     clearError();
+    stickToBottomRef.current = true;
     void Promise.resolve(regenerate()).catch((retryError: unknown) => {
       console.error("[useAgentChat] Retry failed", retryError);
     });
@@ -1015,7 +1041,7 @@ function Chat() {
             <p>Streaming, message persistence, client tools, and approvals are handled by Cloudflare Agents SDK.</p>
           </div>
 
-          <div className="message-list" aria-live="polite" role="log">
+          <div className="message-list" aria-live="polite" onScroll={onMessageListScroll} ref={messageListRef} role="log">
             {messages.length === 0 ? (
               <div className="empty-state">
                 Ask for a plan, a Cloudflare operation, a memory lookup, or your browser timezone.
@@ -1023,6 +1049,7 @@ function Chat() {
             ) : (
               messages.map((message) => (
                 <Message
+                  activeApprovalIds={activeApprovalIds}
                   approveToolAlways={approveToolAlways}
                   key={message.id}
                   message={message}
@@ -1050,7 +1077,6 @@ function Chat() {
                 </div>
               </div>
             ) : null}
-            <div ref={messageListEndRef} />
           </div>
 
           <form className="composer" onSubmit={onSubmit}>
@@ -1114,10 +1140,12 @@ function Chat() {
 }
 
 function Message({
+  activeApprovalIds,
   approveToolAlways,
   message,
   respondToToolApproval
 }: {
+  activeApprovalIds: ReadonlySet<string>;
   approveToolAlways: (toolName: string, approvalId?: string) => void;
   message: UIMessage;
   respondToToolApproval: (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => boolean;
@@ -1127,6 +1155,7 @@ function Message({
       <small>{message.role}</small>
       {message.parts.map((part, index) => (
         <MessagePart
+          activeApprovalIds={activeApprovalIds}
           approveToolAlways={approveToolAlways}
           key={partKey(part, index)}
           part={part}
@@ -1138,10 +1167,12 @@ function Message({
 }
 
 function MessagePart({
+  activeApprovalIds,
   approveToolAlways,
   part,
   respondToToolApproval
 }: {
+  activeApprovalIds: ReadonlySet<string>;
   approveToolAlways: (toolName: string, approvalId?: string) => void;
   part: UIMessage["parts"][number];
   respondToToolApproval: (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => boolean;
@@ -1163,16 +1194,18 @@ function MessagePart({
     const input = getToolInput(part);
     const output = getToolOutput(part);
     const approval = getToolApproval(part);
-    const canRespondToApproval = Boolean(approval?.id && toolCallId);
+    const approvalIsActive = Boolean(approval?.id && activeApprovalIds.has(approval.id));
+    const displayState = state === "waiting-approval" && !approvalIsActive ? "expired-approval" : state;
+    const canRespondToApproval = Boolean(approval?.id && toolCallId && approvalIsActive);
 
     return (
-      <div className="tool-part" data-state={state}>
+      <div className="tool-part" data-state={displayState}>
         <div className="tool-heading">
           <strong>{toolName}</strong>
-          <span className="pill" data-state={state}>{state}</span>
+          <span className="pill" data-state={displayState}>{displayState}</span>
         </div>
         {input ? <pre>{formatJson(input)}</pre> : null}
-        {state === "waiting-approval" ? (
+        {state === "waiting-approval" && approvalIsActive ? (
           <>
             <p className="tool-note">
               {approval
@@ -1206,6 +1239,11 @@ function MessagePart({
               </button>
             </div>
           </>
+        ) : null}
+        {state === "waiting-approval" && !approvalIsActive ? (
+          <p className="tool-note">
+            This approval belongs to an older turn and is no longer actionable. Send a new request to run it again.
+          </p>
         ) : null}
         {state === "denied" ? <p className="tool-note">Rejected by owner.</p> : null}
         {output ? (
@@ -1284,19 +1322,38 @@ type McpServerState = {
   tools?: unknown[];
 };
 
-function countPendingApprovals(messages: UIMessage[]) {
-  return messages.reduce(
-    (total, message) =>
-      total +
-      message.parts.filter((part) => isToolUIPart(part) && getToolPartState(part) === "waiting-approval")
-        .length,
-    0
+function isNearScrollBottom(element: HTMLElement) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight < 140;
+}
+
+function formatChatErrorMessage(error: Error | undefined) {
+  if (!error?.message) return null;
+  if (error.message.startsWith("Tool result is missing for tool call")) {
+    return "A previous tool call is incomplete in the saved history. It has been isolated; send the request again if needed.";
+  }
+  if (error.message.includes("for missing text part") || error.message.includes("for missing reasoning part")) {
+    return "The stream sent an out-of-order protocol chunk. Dismiss this notice and send the next message when ready.";
+  }
+  return error.message;
+}
+
+function isProtocolRecoveryError(error: Error | undefined) {
+  const message = error?.message ?? "";
+  return (
+    message.startsWith("Tool result is missing for tool call") ||
+    message.includes("for missing text part") ||
+    message.includes("for missing reasoning part") ||
+    message.includes("Cannot read properties of undefined (reading 'state')")
   );
 }
 
-function indexPendingApprovals(messages: UIMessage[]) {
+function indexActivePendingApprovals(messages: UIMessage[]) {
   const index = new Map<string, string>();
-  for (const message of messages) {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (message.role === "user") return index;
+    if (message.role !== "assistant") continue;
+
     for (const part of message.parts) {
       if (!isToolUIPart(part) || getToolPartState(part) !== "waiting-approval") continue;
 
@@ -1304,6 +1361,8 @@ function indexPendingApprovals(messages: UIMessage[]) {
       const toolCallId = getToolCallId(part);
       if (approval?.id && toolCallId) index.set(approval.id, toolCallId);
     }
+
+    return index;
   }
   return index;
 }
@@ -1500,8 +1559,8 @@ export class PersonalChatAgent extends AIChatAgent<RuntimeEnv> {
         "Cloudflare account id: " + ((env.OPEN_THINK_CF_ACCOUNT_ID ?? generatedCloudflareAccountId) || "not configured")
       ].join("\\n"),
       messages: pruneMessages({
-        messages: await convertToModelMessages(this.messages),
-        toolCalls: "before-last-2-messages"
+        messages: await convertToModelMessages(this.messages, { ignoreIncompleteToolCalls: true }),
+        toolCalls: "before-last-message"
       }),
       tools: {
         ...this.mcpToolsWithApprovalPolicy(),
