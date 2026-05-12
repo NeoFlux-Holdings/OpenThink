@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import ts from "typescript";
 import { renderAgentsSdkPersonalAgentRuntime } from "../agents-sdk-runtime-template";
 import { buildDeploymentRequest } from "../deployment-engine";
 
@@ -82,9 +83,11 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("<Streamdown controls={false}>");
     expect(client).toContain("<MarkdownRenderer>{part.text}</MarkdownRenderer>");
     expect(client).toContain('useAgentChat({');
-    expect(client).toContain("autoContinueAfterToolResult: false");
+    expect(client).toContain("autoContinueAfterToolResult: true");
     expect(client).toContain("resume: false");
-    expect(client).toContain("sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses");
+    expect(client).not.toContain("sendAutomaticallyWhen");
+    expect(client).not.toContain("approvalContinuationSignature");
+    expect(client).toContain("mcpServerSnapshotsEqual");
     expect(client).toContain("addToolApprovalResponse({ id: approvalId, approved })");
     expect(client).toContain("indexActivePendingApprovals");
     expect(client).toContain("activeApprovalIds");
@@ -105,12 +108,34 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("readAlwaysAllowedTools");
     expect(client).toContain("Tool allowlist");
     expect(client).toContain("Clear tool allowlist");
+    expect(client).toContain("Use /goal to set an active objective");
+    expect(client).toContain('Metric label="Slash commands" value="/goal enabled"');
+    expect(client).toContain("SubAgentConsole");
+    expect(client).toContain("Agent Workstreams");
+    expect(client).toContain("subAgentTemplates");
+    expect(client).toContain("Create sub-agent");
+    expect(client).toContain("HostedAgentPanel");
+    expect(client).toContain("Copy SDK snippet");
+    expect(client).toContain("createHostedCloudAgentClient");
+    expect(client).toContain('"/subagents"');
     expect(client).toContain('clearHistory');
     expect(client).toContain('onMcpUpdate');
+    expect(client).toContain("Executor MCP");
+    expect(client).toContain("formatExecutionPlane");
     expect(client).toContain('agent.reconnect()');
     expect(client).toContain('stop,');
     expect(client).toContain('toolApprovalPolicy');
     expect(client).toContain('agent: "PersonalChatAgent"');
+    expect(
+      ts.transpileModule(client, {
+        compilerOptions: {
+          jsx: ts.JsxEmit.ReactJSX,
+          module: ts.ModuleKind.ESNext,
+          target: ts.ScriptTarget.ES2022
+        },
+        reportDiagnostics: true
+      }).diagnostics ?? []
+    ).toEqual([]);
 
     const source = files.find((file) => file.path === "src/server.ts")?.contents ?? "";
     expect(source).toContain('import { AIChatAgent } from "@cloudflare/ai-chat"');
@@ -125,6 +150,31 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(source).toContain("getUserTimezone: tool(");
     expect(source).toContain("confirmCloudflareOperation: tool(");
     expect(source).toContain("needsApproval: async () => true");
+    expect(source).toContain("handleGoalRequest");
+    expect(source).toContain('url.pathname === "/health"');
+    expect(source).toContain('url.pathname === "/manifest"');
+    expect(source).toContain('url.pathname === "/cloud-agent/profile"');
+    expect(source).toContain("hostedAgentManifest");
+    expect(source).toContain("goalCommandInstruction");
+    expect(source).toContain("Slash command /goal is enabled.");
+    expect(source).toContain('command: "/goal"');
+    expect(source).toContain('slashCommands');
+    expect(source).toContain("generatedCloudAgentInstance");
+    expect(source).toContain('"profileEndpoint":"/cloud-agent/profile"');
+    expect(source).toContain("cloudAgentInstanceState");
+    expect(source).toContain("OPEN_THINK_EXECUTOR_MCP_URL");
+    expect(source).toContain("executorUrl");
+    expect(source).toContain("default-pending");
+    expect(source).toContain("pointsTo");
+    expect(source).toContain('"executor"');
+    expect(source).toContain("setActiveGoal: tool(");
+    expect(source).toContain("formatActiveGoalMemory");
+    expect(source).toContain("createSubAgent: tool(");
+    expect(source).toContain("sendSubAgentMessage: tool(");
+    expect(source).toContain("handleSubAgentRoute");
+    expect(source).toContain("subAgentCapabilityState");
+    expect(source).toContain("research-scout");
+    expect(source).toContain("sub_agents");
     expect(source).toContain("waitForMcpConnections = { timeout: 10_000 }");
     expect(source).toContain("prepareModelMessages(this.messages)");
     expect(source).toContain("sanitizeMessagesForModel");
@@ -136,5 +186,14 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(source).toContain('transport: "websocket"');
     expect(source).toContain("Personal agent subsystem:");
     expect(source).toContain("/personal-agent/setup");
+    expect(
+      ts.transpileModule(source, {
+        compilerOptions: {
+          module: ts.ModuleKind.ESNext,
+          target: ts.ScriptTarget.ES2022
+        },
+        reportDiagnostics: true
+      }).diagnostics ?? []
+    ).toEqual([]);
   });
 });

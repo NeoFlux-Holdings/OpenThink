@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DeploymentRecord } from "../d1";
+import type { DeploymentRecord, DeploymentRepository } from "../d1";
 import {
+  runAutomaticDeploymentUpdatesFromEnv,
   runDeploymentUpdate,
   summarizeDeploymentUpdate
 } from "../deployment-update";
@@ -571,6 +572,88 @@ describe("deployment updates", () => {
         })
       ])
     );
+  });
+
+  it("records automatic update failures without aborting the scheduled runner", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const target = String(url);
+        if (target.includes("api.github.com/repos/NeoFlux-Holdings/OpenThink/commits/main")) {
+          return new Response(JSON.stringify({ sha: "abc123456789" }), {
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return json({ result: {} });
+      }) as unknown as typeof fetch
+    );
+
+    const enabledDeployment = deploymentRecord({
+      resourcePlan: {
+        openThinkUpdate: {
+          target: {
+            deploymentId: "agent-test",
+            accountId: "acct",
+            scriptName: "open-think-agent",
+            agentUrl: "https://open-think-agent.example.workers.dev"
+          },
+          autoUpdate: {
+            enabled: true,
+            direction: "bidirectional",
+            intervalSeconds: 300
+          },
+          updatedAt: "2026-05-02T00:00:00.000Z"
+        }
+      }
+    });
+    const disabledDeployment = deploymentRecord({
+      resourcePlan: {
+        openThinkUpdate: {
+          target: {
+            deploymentId: "agent-disabled",
+            accountId: "acct",
+            scriptName: "disabled-agent",
+            agentUrl: "https://disabled-agent.example.workers.dev"
+          },
+          autoUpdate: {
+            enabled: false,
+            direction: "bidirectional",
+            intervalSeconds: 300
+          },
+          updatedAt: "2026-05-02T00:00:00.000Z"
+        }
+      }
+    });
+    const statusUpdates: Array<{
+      deploymentId: string;
+      resourcePlan?: Record<string, unknown>;
+    }> = [];
+    const repository = {
+      list: async () => [enabledDeployment, disabledDeployment],
+      updateStatus: async (
+        deploymentId: string,
+        _status: DeploymentRecord["status"],
+        resourcePlan?: Record<string, unknown>
+      ) => {
+        statusUpdates.push({
+          deploymentId,
+          ...(resourcePlan ? { resourcePlan } : {})
+        });
+      }
+    } as unknown as DeploymentRepository;
+
+    await runAutomaticDeploymentUpdatesFromEnv(repository, {}, 10);
+
+    const updateMetadata = statusUpdates[0]?.resourcePlan?.openThinkUpdate;
+    expect(statusUpdates).toHaveLength(1);
+    expect(statusUpdates[0]?.deploymentId).toBe("agent-test");
+    expect(updateMetadata).toMatchObject({
+      lastAction: "reconcile",
+      lastError: expect.stringContaining("Updating a deployed Worker requires"),
+      autoUpdate: {
+        enabled: true
+      }
+    });
   });
 
 });

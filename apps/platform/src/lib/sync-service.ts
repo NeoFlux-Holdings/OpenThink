@@ -8,6 +8,7 @@ import {
   type SyncResult,
   type SyncStatus
 } from "@open-think/sync";
+import { Data, Effect } from "effect";
 
 const globalSync = globalThis as typeof globalThis & {
   __openThinkSyncService?: RepoSyncService;
@@ -72,14 +73,48 @@ export async function setAutoSyncFromEnv(
 export async function runAutomaticSyncFromEnv(
   env?: Record<string, unknown>
 ): Promise<SyncResult | SyncStatus> {
-  const service = syncServiceFromEnv(env);
-  const status = await service.status();
+  return Effect.runPromise(runAutomaticSyncFromEnvEffect(env));
+}
 
-  if (!status.autoSync.enabled) {
-    return status;
+export class AutomaticSyncError extends Data.TaggedError("AutomaticSyncError")<{
+  readonly operation: "status" | "reconcile";
+  readonly cause: unknown;
+}> {
+  override get message(): string {
+    return `Automatic sync ${this.operation} failed: ${syncErrorMessage(this.cause)}`;
   }
+}
 
-  return service.reconcile();
+export function runAutomaticSyncFromEnvEffect(
+  env?: Record<string, unknown>
+): Effect.Effect<SyncResult | SyncStatus, AutomaticSyncError> {
+  const service = syncServiceFromEnv(env);
+
+  return Effect.gen(function* () {
+    const status = yield* syncOperation("status", () => service.status());
+
+    if (!status.autoSync.enabled) {
+      return status;
+    }
+
+    return yield* syncOperation("reconcile", () => service.reconcile());
+  });
+}
+
+function syncOperation<A>(
+  operation: "status" | "reconcile",
+  run: () => Promise<A>
+): Effect.Effect<A, AutomaticSyncError> {
+  return Effect.tryPromise({
+    try: run,
+    catch: (cause) => new AutomaticSyncError({ operation, cause })
+  });
+}
+
+function syncErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error) return error;
+  return "unknown sync failure";
 }
 
 function normalizeEnv(env: Record<string, unknown>): Record<string, string | undefined> {

@@ -8,3 +8,8 @@ The platform favors four deployment paths:
 - Deploy to Cloudflare for GitHub-backed builders.
 - Agentic provisioning for AI coding agents using the Cloudflare API MCP surface.
 - Partner API provisioning for white-label tenant ownership.
+
+See also:
+
+- [Hosted Cloud Agent Workflow](./guide/hosted-cloud-agent.md)
+- [Effect and Executor Workflows](./guide/effect-executor.md)

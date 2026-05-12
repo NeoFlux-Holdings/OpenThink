@@ -12,6 +12,34 @@ Public source: [NeoFlux-Holdings/OpenThink](https://github.com/NeoFlux-Holdings/
 - `starters/personal-agent`: the single all-in-one starter for chat, coding, messaging-style workflows, files, memory, tasks, terminal handoff, and MCP tools.
 - `tools`: internal utilities for generating Cloudflare deployment manifests.
 
+## Hosted Agent SDK
+
+Deployed personal agents expose a hosted Cloud Agent surface in addition to the chat UI:
+
+- `/health`, `/manifest`, and `/cloud-agent/profile` for discovery.
+- `/goal` for active objective setup.
+- `/subagents` and `/subagents/{id}/messages|control|summary` for delegated Cloud Agent Instance children.
+- `/personal-agent/setup` and `/runtime/context` for customization/readiness metadata.
+- Executor is the default execution-plane contract. `OPEN_THINK_EXECUTOR_MCP_URL` points to an MCP endpoint, usually an OpenThink Sandbox bridge backed by Cloudflare Containers, not directly to a raw container.
+
+External apps can use `@open-think/core`:
+
+```ts
+import { createHostedCloudAgentClient } from "@open-think/core";
+
+const agent = createHostedCloudAgentClient({
+  baseUrl: "https://your-agent.workers.dev"
+});
+
+await agent.goal("Ship a hosted workflow");
+const child = await agent.createSubAgent({
+  name: "Scout",
+  purpose: "Inspect deploy readiness",
+  mode: "hybrid"
+});
+await agent.sendSubAgentMessage(child.subAgent.id, "Continue.");
+```
+
 ## Run locally
 
 ```bash

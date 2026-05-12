@@ -24,6 +24,25 @@ describe("renderAgentWorkerModule", () => {
     expect(source).toContain("chatAbortController");
     expect(source).toContain("server-sent-events");
     expect(source).toContain("Agents SDK package deployments use AIChatAgent WebSocket streaming");
+    expect(source).toContain('"/goal"');
+    expect(source).toContain("handleGoalRequest");
+    expect(source).toContain("goalCommandInstruction");
+    expect(source).toContain("Slash command /goal is enabled.");
+    expect(source).toContain("Use /goal to set an active objective");
+    expect(source).toContain("generatedCloudAgentInstance");
+    expect(source).toContain("cloudAgentInstanceState");
+    expect(source).toContain("OPEN_THINK_EXECUTOR_MCP_URL");
+    expect(source).toContain("callExecutorMcpTool");
+    expect(source).toContain("set_active_goal");
+    expect(source).toContain("formatActiveGoalMemory");
+    expect(source).toContain('"/subagents"');
+    expect(source).toContain("create_sub_agent");
+    expect(source).toContain("handleSubAgentRoute");
+    expect(source).toContain("subAgentCapabilityState");
+    expect(source).toContain("Create sub-agent");
+    expect(source).toContain('"/cloud-agent/profile"');
+    expect(source).toContain("Hosted Agent SDK");
+    expect(source).toContain("createHostedCloudAgentClient");
 
     const parsed = ts.transpileModule(source, {
       compilerOptions: {

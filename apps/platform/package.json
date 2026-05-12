@@ -29,6 +29,7 @@
     "@open-think/terminal": "workspace:*",
     "@open-think/ui": "workspace:*",
     "@opennextjs/cloudflare": "latest",
+    "effect": "^3.21.2",
     "lucide-react": "latest",
     "next": "latest",
     "react": "latest",

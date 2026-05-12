@@ -1,5 +1,9 @@
 import type { DeploymentRequest } from "./deployment-engine";
 import {
+  buildCloudAgentInstanceProfile,
+  cloudAgentGoalInstruction
+} from "./cloud-agent-instance";
+import {
   normalizePersonalAgentConfig,
   publicPersonalAgentConfig
 } from "./personal-agent-options";
@@ -31,6 +35,14 @@ export function renderAgentWorkerModule(input: {
   const thinkingLevel = JSON.stringify(input.request.thinkingLevel ?? "medium");
   const personalAgentConfig = normalizePersonalAgentConfig(input.request.personalAgent);
   const personalAgentConfigLiteral = JSON.stringify(publicPersonalAgentConfig(personalAgentConfig));
+  const cloudAgentInstance = buildCloudAgentInstanceProfile({
+    request: input.request,
+    deploymentId: input.deploymentId
+  });
+  const cloudAgentInstanceLiteral = JSON.stringify(cloudAgentInstance);
+  const cloudAgentGoalInstructionLiteral = JSON.stringify(
+    cloudAgentGoalInstruction(cloudAgentInstance)
+  );
   const appHtml = JSON.stringify(renderAgentAppHtml());
 
   return `
@@ -45,10 +57,12 @@ const defaultModel = ${defaultModel};
 const modelProvider = ${modelProvider};
 const thinkingLevel = ${thinkingLevel};
 const generatedPersonalAgentConfig = ${personalAgentConfigLiteral};
+const generatedCloudAgentInstance = ${cloudAgentInstanceLiteral};
+const generatedCloudAgentGoalInstruction = ${cloudAgentGoalInstructionLiteral};
 const appHtml = ${appHtml};
 const runtimeAwarenessVersion = "2026-05-04.2";
-const capabilities = ["chat", "coding", "messaging", "files", "memory", "tasks", "terminal", "mcp", "cloudflare-api", "self-update", "binding-management", "cloudflare-sandbox-planning", "cloudflare-container-planning", "cloudflare-app-deployment-planning"];
-const endpoints = ["/", "/health", "/manifest", "/skills", "/chat", "/chat?stream=1", "/projects", "/threads", "/messages", "/memory", "/personal-agent/setup", "/files", "/tasks", "/terminal", "/secrets", "/updates/status", "/updates/remote", "/updates/apply", "/updates/bindings", "/runtime/context", "/cloudflare/status", "/cloudflare/api", "/mcp/cloudflare", "/mcp/servers", "/mcp/tools", "/mcp/call"];
+const capabilities = ["chat", "coding", "messaging", "goals", "files", "memory", "tasks", "terminal", "mcp", "cloudflare-api", "self-update", "binding-management", "cloudflare-sandbox-planning", "cloudflare-container-planning", "cloudflare-app-deployment-planning"];
+const endpoints = ["/", "/health", "/manifest", "/cloud-agent/profile", "/skills", "/goal", "/subagents", "/subagents/{id}/messages", "/subagents/{id}/control", "/subagents/{id}/summary", "/chat", "/chat?stream=1", "/projects", "/threads", "/messages", "/memory", "/personal-agent/setup", "/files", "/tasks", "/terminal", "/secrets", "/updates/status", "/updates/remote", "/updates/apply", "/updates/bindings", "/runtime/context", "/cloudflare/status", "/cloudflare/api", "/mcp/cloudflare", "/mcp/servers", "/mcp/tools", "/mcp/call"];
 
 export default {
   async fetch(request, env) {
@@ -71,8 +85,14 @@ export default {
         modelProvider: env.OPEN_THINK_MODEL_PROVIDER || modelProvider,
         thinkingLevel: env.OPEN_THINK_THINKING_LEVEL || thinkingLevel,
         personalAgent,
+        cloudAgentInstance: cloudAgentInstanceState(env),
+        sdk: cloudAgentInstanceState(env).sdk,
         runtimeAwarenessVersion,
         capabilities,
+        slashCommands: {
+          goal: goalCommandPayload("", env)
+        },
+        subAgents: subAgentCapabilityState(env),
         chat: {
           defaultTransport: "server-sent-events",
           streamEndpoint: "/chat?stream=1",
@@ -95,10 +115,16 @@ export default {
         modelProvider: env.OPEN_THINK_MODEL_PROVIDER || modelProvider,
         thinkingLevel: env.OPEN_THINK_THINKING_LEVEL || thinkingLevel,
         personalAgent,
+        cloudAgentInstance: cloudAgentInstanceState(env),
+        sdk: cloudAgentInstanceState(env).sdk,
         runtimeAwarenessVersion,
         cloudflareAccountId: env.OPEN_THINK_CF_ACCOUNT_ID || cloudflareAccountId || null,
         capabilities,
         endpoints,
+        slashCommands: {
+          goal: goalCommandPayload("", env)
+        },
+        subAgents: subAgentCapabilityState(env),
         chat: {
           transports: ["server-sent-events", "json"],
           streamEndpoint: "/chat?stream=1",
@@ -126,8 +152,29 @@ export default {
       });
     }
 
+    if (url.pathname === "/cloud-agent/profile") {
+      return Response.json(cloudAgentInstanceState(env));
+    }
+
     if (url.pathname === "/skills") {
       return Response.json(cloudflarePlatformSkills(env));
+    }
+
+    if (url.pathname === "/goal" && (request.method === "GET" || request.method === "POST")) {
+      return handleGoalRequest(request, env);
+    }
+
+    if (url.pathname === "/subagents" && request.method === "GET") {
+      return handleSubAgentsList(env);
+    }
+
+    if (url.pathname === "/subagents" && request.method === "POST") {
+      return handleSubAgentCreate(request, env);
+    }
+
+    const subAgentRoute = parseSubAgentRoute(url.pathname);
+    if (subAgentRoute) {
+      return handleSubAgentRoute(request, env, subAgentRoute);
     }
 
     if (url.pathname === "/chat" && request.method === "POST") {
@@ -320,10 +367,108 @@ export default {
       owner,
       status: "ready",
       capabilities,
-      endpoints
+      endpoints,
+      cloudAgentInstance: cloudAgentInstanceState(env),
+      slashCommands: {
+        goal: goalCommandPayload("", env)
+      },
+      subAgents: subAgentCapabilityState(env)
     });
   }
 };
+
+async function handleGoalRequest(request, env) {
+  if (request.method === "GET") {
+    return Response.json(goalCommandPayload("", env));
+  }
+  if (request.method !== "POST") {
+    return Response.json({ error: "Method not allowed" }, { status: 405 });
+  }
+  const payload = await request.json().catch(() => ({}));
+  const goal = String(payload.goal ?? payload.text ?? payload.message ?? "").trim();
+  return Response.json(goalCommandPayload(goal, env));
+}
+
+function goalCommandPayload(goal = "", env) {
+  const trimmedGoal = String(goal || "").trim();
+  return {
+    enabled: true,
+    command: "/goal",
+    endpoint: "/goal",
+    cloudAgentInstance: env ? cloudAgentInstanceState(env) : generatedCloudAgentInstance,
+    usage: ["/goal Ship the deployment updater", "/goal"],
+    behavior: "Turns a requested objective into an active goal brief with success criteria, milestones, next actions, risks, and a resume prompt.",
+    prompt: goalCommandPrompt(trimmedGoal)
+  };
+}
+
+function goalCommandPrompt(goal) {
+  if (!goal) {
+    return [
+      "Goal command received with no goal text.",
+      "Review active goals from this conversation and any available memory.",
+      "If no active goal is clear, ask the owner for the objective in one concise question."
+    ].join("\\n");
+  }
+
+  return [
+    "Goal command received.",
+    "",
+    "Active goal: " + goal,
+    "",
+    "Create a concise goal brief with objective, success criteria, constraints, milestones, next actions, risks, and a resume prompt.",
+    "Use available memory, task, file, or MCP tools when helpful to persist or advance the goal. If those tools are unavailable, keep the goal in conversation state and say what would be persisted when available."
+  ].join("\\n");
+}
+
+function goalCommandInstruction() {
+  return [
+    "Slash command /goal is enabled.",
+    "When the owner's message begins with /goal, treat the remaining text as an active goal setup or update.",
+    "If the command includes a goal, respond with a compact goal brief: objective, success criteria, constraints, milestones, next actions, risks, and a resume prompt.",
+    "If the command has no goal text, review active goals from conversation and memory when available, then ask for the missing objective only if needed.",
+    "Call set_active_goal after drafting or updating a goal so the brief is persisted when D1 is bound.",
+    "Use available memory, task, file, or MCP tools when helpful to persist or advance the goal; otherwise keep the goal anchored in the chat state."
+  ].join("\\n");
+}
+
+function cloudAgentInstanceState(env) {
+  const executorUrl = sanitizeHttpsUrl(env.OPEN_THINK_EXECUTOR_MCP_URL);
+  return {
+    ...generatedCloudAgentInstance,
+    skills: (generatedCloudAgentInstance.skills || []).map((skill) =>
+      skill.id === "executor-mcp" ? { ...skill, enabled: Boolean(executorUrl) } : skill
+    ),
+    execution: {
+      ...generatedCloudAgentInstance.execution,
+      executor: {
+        ...generatedCloudAgentInstance.execution.executor,
+        enabled: Boolean(executorUrl),
+        configured: Boolean(executorUrl),
+        mcpServerUrl: executorUrl ? "configured" : null,
+        authTokenConfigured: Boolean(env.OPEN_THINK_EXECUTOR_AUTH_TOKEN)
+      }
+    }
+  };
+}
+
+function cloudAgentInstanceInstruction(env) {
+  return [
+    generatedCloudAgentGoalInstruction,
+    "Runtime cloud agent instance state:",
+    JSON.stringify(cloudAgentInstanceState(env), null, 2)
+  ].join("\\n\\n");
+}
+
+function subAgentCapabilityState(env) {
+  return {
+    enabled: true,
+    persistence: env.DB ? "D1 sub_agents and sub_agent_messages" : "unavailable until DB binding is configured",
+    endpoints: ["/subagents", "/subagents/{id}", "/subagents/{id}/messages", "/subagents/{id}/control", "/subagents/{id}/summary"],
+    controls: ["create", "pause", "resume", "archive", "summarize", "message", "brief-main-chat"],
+    modes: ["agents-sdk", "executor", "hybrid"]
+  };
+}
 
 async function handleChat(request, env) {
   const url = new URL(request.url);
@@ -429,6 +574,8 @@ async function resolveChatResponse(payload, env, modelSettings) {
         "You help with coding, messaging, chat, task planning, files, memory, Cloudflare operations, terminal workflows, source updates, MCP-oriented tool use, and selecting the right Cloudflare primitive for new software.",
         personalAgentSystemInstruction(personalAgent),
         "You have direct awareness of this deployment through the runtime snapshot below. Do not say you lack the script name, D1 memory table, bindings, update strategy, or Cloudflare account context when it is present in that snapshot.",
+        cloudAgentInstanceInstruction(env),
+        goalCommandInstruction(),
         "You have explicit Cloudflare platform skills in the runtime snapshot. When asked about Sandbox, Containers, Workers, Pages, or deploying new software, use those skills. Do not claim Containers or Sandbox are impossible; say whether they are available in this runtime, what account plan/bindings are required, and how you would add them.",
         "Decision rule: Workers/Pages first for HTTP apps, APIs, static sites, scheduled jobs, queues, and edge-native integrations. Sandbox for untrusted or agent-generated code execution, command execution, file work, browser terminals, preview URLs, data analysis, and ephemeral IDE/CI workflows. Containers for custom runtimes, existing Docker images, long-running services, heavier CPU/memory/disk, Linux tools, or servers that Workers cannot run. Durable Objects coordinate stateful sessions and per-user instances. R2, D1, Queues, Vectorize, AI, Workflows, and Access compose around these choices.",
         "Builder workflow: first classify the requested software, then propose the smallest Cloudflare architecture, list required permissions/bindings/resources, identify paid-plan or beta gates, create a deployment plan, ask before cost-bearing/destructive operations, then use MCP/API/update tools to provision or generate the code. If the current runtime lacks a binding, explain the exact binding/config update needed instead of saying the feature is unavailable.",
@@ -631,6 +778,100 @@ function agentTools() {
     {
       type: "function",
       function: {
+        name: "set_active_goal",
+        description: "Persist the owner's active /goal brief into D1 memory when the DB binding is available.",
+        parameters: {
+          type: "object",
+          properties: {
+            goal: { type: "string", description: "The active goal objective." },
+            successCriteria: {
+              type: "array",
+              items: { type: "string" },
+              description: "How the owner and agent will know the goal is complete."
+            },
+            milestones: {
+              type: "array",
+              items: { type: "string" },
+              description: "Major checkpoints for the goal."
+            },
+            nextActions: {
+              type: "array",
+              items: { type: "string" },
+              description: "Concrete next actions to take."
+            },
+            notes: { type: "string", description: "Optional constraints, risks, or context." }
+          },
+          required: ["goal"]
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "create_sub_agent",
+        description: "Create a D1-tracked Cloud Agent Instance sub-agent for delegated work.",
+        parameters: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            purpose: { type: "string" },
+            systemPrompt: { type: "string" },
+            brain: { type: "string" },
+            skills: { type: "array", items: { type: "string" } },
+            mode: { type: "string", enum: ["agents-sdk", "executor", "hybrid"] },
+            model: { type: "string" }
+          },
+          required: ["name", "purpose"]
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "sub_agent_control",
+        description: "Pause, resume, mark working, or archive a tracked sub-agent.",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            status: { type: "string", enum: ["ready", "working", "paused", "archived"] }
+          },
+          required: ["id", "status"]
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "sub_agent_message",
+        description: "Send a message to a tracked sub-agent and receive its response.",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            message: { type: "string" }
+          },
+          required: ["id", "message"]
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "sub_agent_summary",
+        description: "Refresh and return a concise summary for a tracked sub-agent.",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string" }
+          },
+          required: ["id"]
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
         name: "files_list",
         description: "List recent artifact keys from the agent's R2 storage bucket.",
         parameters: {
@@ -730,8 +971,8 @@ function agentTools() {
         parameters: {
           type: "object",
           properties: {
-            server: { type: "string", description: "MCP server id or name. Use cloudflare for Cloudflare API." },
-            name: { type: "string", enum: ["search", "execute"] },
+            server: { type: "string", description: "MCP server id or name. Use cloudflare for Cloudflare API or executor for the default executor MCP execution plane when configured." },
+            name: { type: "string", description: "Tool name. Use search or execute for Cloudflare; use the discovered executor tool name for executor." },
             arguments: { type: "object" }
           },
           required: ["name", "arguments"]
@@ -779,7 +1020,7 @@ function extractToolCalls(output, responseText) {
     calls.push({ name: "mcp_call", arguments: { server, name, arguments: args } });
   }
 
-  const builtInXmlCalls = String(responseText ?? "").matchAll(/<invoke\\s+name=["'](runtime_status|memory_list|files_list|queue_task|secret_put|binding_add|update_status|cloudflare_platform_advice)["'][\\s\\S]*?<\\/invoke>/g);
+  const builtInXmlCalls = String(responseText ?? "").matchAll(/<invoke\\s+name=["'](runtime_status|memory_list|set_active_goal|create_sub_agent|sub_agent_control|sub_agent_message|sub_agent_summary|files_list|queue_task|secret_put|binding_add|update_status|cloudflare_platform_advice)["'][\\s\\S]*?<\\/invoke>/g);
   for (const match of builtInXmlCalls) {
     const block = match[0];
     const toolName = match[1];
@@ -813,6 +1054,46 @@ async function runToolCalls(calls, env) {
       results.push({
         tool: "memory_list",
         result: await memoryList(env, Number(call.arguments?.limit ?? 20))
+      });
+      continue;
+    }
+
+    if (call.name === "set_active_goal") {
+      results.push({
+        tool: "set_active_goal",
+        result: await setActiveGoal(env, call.arguments ?? {})
+      });
+      continue;
+    }
+
+    if (call.name === "create_sub_agent") {
+      results.push({
+        tool: "create_sub_agent",
+        result: await createSubAgent(env, call.arguments ?? {})
+      });
+      continue;
+    }
+
+    if (call.name === "sub_agent_control") {
+      results.push({
+        tool: "sub_agent_control",
+        result: await updateSubAgentStatus(env, call.arguments?.id, normalizeSubAgentStatus(call.arguments?.status, "ready"))
+      });
+      continue;
+    }
+
+    if (call.name === "sub_agent_message") {
+      results.push({
+        tool: "sub_agent_message",
+        result: await sendSubAgentMessage(env, call.arguments?.id, String(call.arguments?.message ?? ""))
+      });
+      continue;
+    }
+
+    if (call.name === "sub_agent_summary") {
+      results.push({
+        tool: "sub_agent_summary",
+        result: await refreshSubAgentSummary(env, call.arguments?.id)
       });
       continue;
     }
@@ -871,7 +1152,9 @@ async function runToolCalls(calls, env) {
     const toolArgs = args.arguments || args.args || {};
     const result = server === "cloudflare"
       ? await callCloudflareMcpTool(toolName, toolArgs, env)
-      : { ok: false, error: "Only the built-in Cloudflare MCP bridge is currently available from chat." };
+      : server === "executor"
+        ? await callExecutorMcpTool(toolName, toolArgs, env)
+        : { ok: false, error: "Only cloudflare and executor MCP bridges are currently available from chat." };
     results.push({ server, tool: toolName, arguments: toolArgs, result });
   }
   return results;
@@ -915,6 +1198,7 @@ function cloudflarePlatformSkills(env) {
     currentRuntime: {
       runsIn: "Cloudflare Worker",
       canSelfModifyThroughWorkerUpload: Boolean(env.OPEN_THINK_CF_API_TOKEN),
+      executorMcpConfigured: Boolean(sanitizeHttpsUrl(env.OPEN_THINK_EXECUTOR_MCP_URL)),
       sandboxBound,
       containerBound,
       paidPlanRequiredForSandboxAndContainers: true
@@ -999,6 +1283,24 @@ function cloudflarePlatformSkills(env) {
       }
     ],
     skills: [
+      {
+        id: "executor-mcp-cloud-agent",
+        name: "Executor MCP execution plane",
+        docs: "https://github.com/RhysSullivan/executor",
+        status: sanitizeHttpsUrl(env.OPEN_THINK_EXECUTOR_MCP_URL) ? "configured" : "not-configured",
+        whatItIs: "An optional external execution plane for cloud agent instances. Agents SDK keeps chat streaming, state, MCP orchestration, and approvals; executor handles workloads that belong outside the Worker isolate.",
+        useWhen: [
+          "Need code execution, subprocesses, filesystem work, browser automation, OpenAPI execution, or workflow workers.",
+          "Need an agent skill runtime that can evolve independently from this personal-agent Worker.",
+          "Need to compose gbrain/gskills goals with a typed execution service instead of running arbitrary code in the chat runtime."
+        ],
+        addToThisAgent: [
+          "Deploy or host executor as an MCP-capable service.",
+          "Set OPEN_THINK_EXECUTOR_MCP_URL to its HTTPS MCP endpoint.",
+          "Optionally set OPEN_THINK_EXECUTOR_AUTH_TOKEN when the executor endpoint requires bearer auth.",
+          "Use /goal to anchor objectives; the agent will prefer executor for execution-heavy steps when configured."
+        ]
+      },
       {
         id: "cloudflare-sandbox",
         name: "Cloudflare Sandbox SDK",
@@ -1216,6 +1518,11 @@ async function runtimeSnapshot(env) {
       }
     },
     personalAgent,
+    cloudAgentInstance: cloudAgentInstanceState(env),
+    subAgents: subAgentCapabilityState(env),
+    slashCommands: {
+      goal: goalCommandPayload("", env)
+    },
     bindings: bindingStatus(env),
     storage: {
       d1MemoryTable: env.DB ? "memories" : null,
@@ -1225,13 +1532,14 @@ async function runtimeSnapshot(env) {
       vectorizeBinding: env.VECTORIZE ? "VECTORIZE" : null
     },
     tools: {
-      builtIn: ["runtime_status", "memory_list", "files_list", "queue_task", "secret_put", "binding_add", "update_status", "cloudflare_platform_advice", "mcp_call"],
+      builtIn: ["runtime_status", "memory_list", "set_active_goal", "create_sub_agent", "sub_agent_control", "sub_agent_message", "sub_agent_summary", "files_list", "queue_task", "secret_put", "binding_add", "update_status", "cloudflare_platform_advice", "mcp_call"],
       mcp: {
         cloudflare: {
           serverUrl: "https://mcp.cloudflare.com/mcp",
           tools: ["search", "execute"],
           runtimeSecretAvailable: Boolean(env.OPEN_THINK_CF_API_TOKEN)
         },
+        executor: executorMcpServerStatus(env),
         docs: "https://docs.mcp.cloudflare.com/mcp"
       }
     },
@@ -1318,6 +1626,358 @@ async function queueTask(env, input) {
     queuedAt: new Date().toISOString()
   });
   return { queued: true, binding: "TASK_QUEUE", payload };
+}
+
+async function setActiveGoal(env, input) {
+  const normalized = {
+    goal: String(input.goal ?? "").trim(),
+    successCriteria: normalizeStringList(input.successCriteria),
+    milestones: normalizeStringList(input.milestones),
+    nextActions: normalizeStringList(input.nextActions),
+    notes: String(input.notes ?? "").trim()
+  };
+  if (!normalized.goal) {
+    return { stored: false, error: "Goal is required." };
+  }
+
+  const text = formatActiveGoalMemory(normalized);
+  if (!env.DB) {
+    return {
+      stored: false,
+      goal: normalized.goal,
+      memory: text,
+      error: "D1 DB binding is not configured; goal remains in conversation state."
+    };
+  }
+
+  await ensureMemoryTable(env);
+  const storedAt = new Date().toISOString();
+  await env.DB.prepare("insert into memories (id, text, created_at) values (?, ?, ?)")
+    .bind(crypto.randomUUID(), text, storedAt)
+    .run();
+  return {
+    stored: true,
+    table: "memories",
+    goal: normalized.goal,
+    memory: text,
+    storedAt
+  };
+}
+
+function formatActiveGoalMemory(input) {
+  const lines = [
+    "Active goal: " + input.goal,
+    listSection("Success criteria", input.successCriteria),
+    listSection("Milestones", input.milestones),
+    listSection("Next actions", input.nextActions),
+    input.notes ? "Notes: " + input.notes : ""
+  ].filter(Boolean);
+  return lines.join("\\n");
+}
+
+function listSection(label, values) {
+  const items = normalizeStringList(values);
+  if (items.length === 0) return "";
+  return label + ": " + items.join("; ");
+}
+
+function normalizeStringList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+}
+
+async function handleSubAgentsList(env) {
+  if (!env.DB) {
+    return Response.json({ available: false, subAgents: [], error: "D1 binding is not configured." });
+  }
+  return Response.json({ available: true, subAgents: await listSubAgents(env) });
+}
+
+async function handleSubAgentCreate(request, env) {
+  const result = await createSubAgent(env, await request.json().catch(() => ({})));
+  return Response.json(result, { status: result.ok === false ? 400 : 201 });
+}
+
+function parseSubAgentRoute(pathname) {
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts[0] !== "subagents" || !parts[1] || parts.length > 3) return null;
+  return {
+    id: decodeURIComponent(parts[1]),
+    action: parts[2] || "detail"
+  };
+}
+
+async function handleSubAgentRoute(request, env, route) {
+  if (route.action === "detail" && request.method === "GET") {
+    const subAgent = await getSubAgent(env, route.id);
+    if (!subAgent) return Response.json({ error: "Sub-agent not found." }, { status: 404 });
+    return Response.json({ subAgent });
+  }
+
+  if (route.action === "messages" && request.method === "GET") {
+    const subAgent = await getSubAgent(env, route.id);
+    if (!subAgent) return Response.json({ error: "Sub-agent not found." }, { status: 404 });
+    return Response.json({ subAgent, messages: await listSubAgentMessages(env, route.id) });
+  }
+
+  if (route.action === "messages" && request.method === "POST") {
+    const payload = await request.json().catch(() => ({}));
+    const result = await sendSubAgentMessage(env, route.id, String(payload.message ?? payload.text ?? ""));
+    return Response.json(result, { status: result.ok === false ? 400 : 200 });
+  }
+
+  if (route.action === "control" && request.method === "POST") {
+    const payload = await request.json().catch(() => ({}));
+    const result = await updateSubAgentStatus(env, route.id, normalizeSubAgentStatus(payload.status ?? payload.action, "ready"));
+    return Response.json(result, { status: result.ok === false ? 400 : 200 });
+  }
+
+  if (route.action === "summary" && request.method === "POST") {
+    const result = await refreshSubAgentSummary(env, route.id);
+    return Response.json(result, { status: result.ok === false ? 400 : 200 });
+  }
+
+  return Response.json({ error: "Unsupported sub-agent route." }, { status: 404 });
+}
+
+async function ensureSubAgentTables(env) {
+  if (!env.DB) return false;
+  await env.DB.prepare(
+    "create table if not exists sub_agents (id text primary key, name text not null, purpose text not null, status text not null, mode text not null, model text not null, brain text not null, system_prompt text not null, skills_json text not null, summary text not null, created_at text not null, updated_at text not null)"
+  ).run();
+  await env.DB.prepare(
+    "create table if not exists sub_agent_messages (id text primary key, sub_agent_id text not null, role text not null, content text not null, created_at text not null)"
+  ).run();
+  return true;
+}
+
+async function createSubAgent(env, input) {
+  if (!(await ensureSubAgentTables(env))) return { ok: false, error: "D1 binding is not configured." };
+  const now = new Date().toISOString();
+  const id = "subagent-" + crypto.randomUUID();
+  const name = normalizeShortText(input.name, "Research Agent");
+  const purpose = normalizeLongText(input.purpose, "Help the main personal agent investigate and advance a delegated objective.");
+  const brain = normalizeShortText(input.brain, "gbrain + gskills");
+  const mode = normalizeSubAgentMode(input.mode);
+  const skills = normalizeStringArray(input.skills);
+  const model = normalizeShortText(input.model, String(env.OPEN_THINK_DEFAULT_MODEL || defaultModel));
+  const systemPrompt = normalizeLongText(input.systemPrompt, defaultSubAgentSystemPrompt(name, purpose, brain, skills, mode));
+  const summary = "Ready. " + purpose;
+
+  await env.DB.prepare(
+    "insert into sub_agents (id, name, purpose, status, mode, model, brain, system_prompt, skills_json, summary, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  )
+    .bind(id, name, purpose, "ready", mode, model, brain, systemPrompt, JSON.stringify(skills), summary, now, now)
+    .run();
+
+  return { ok: true, subAgent: await getSubAgent(env, id) };
+}
+
+async function listSubAgents(env) {
+  if (!(await ensureSubAgentTables(env))) return [];
+  const rows = await env.DB.prepare(
+    "select a.*, (select count(*) from sub_agent_messages m where m.sub_agent_id = a.id) as message_count from sub_agents a order by datetime(a.updated_at) desc limit 100"
+  ).all();
+  return (rows.results || []).map(rowToSubAgent);
+}
+
+async function getSubAgent(env, id) {
+  if (!id || !(await ensureSubAgentTables(env))) return null;
+  const row = await env.DB.prepare(
+    "select a.*, (select count(*) from sub_agent_messages m where m.sub_agent_id = a.id) as message_count from sub_agents a where a.id = ? limit 1"
+  ).bind(id).first();
+  return row ? rowToSubAgent(row) : null;
+}
+
+async function listSubAgentMessages(env, id) {
+  if (!(await ensureSubAgentTables(env))) return [];
+  const rows = await env.DB.prepare(
+    "select id, sub_agent_id, role, content, created_at from sub_agent_messages where sub_agent_id = ? order by datetime(created_at) asc limit 80"
+  ).bind(id).all();
+  return (rows.results || []).map(rowToSubAgentMessage);
+}
+
+async function updateSubAgentStatus(env, id, status) {
+  const subAgent = await getSubAgent(env, id);
+  if (!subAgent) return { ok: false, error: "Sub-agent not found." };
+  const now = new Date().toISOString();
+  await env.DB.prepare("update sub_agents set status = ?, updated_at = ? where id = ?")
+    .bind(status, now, id)
+    .run();
+  return { ok: true, subAgent: await getSubAgent(env, id) };
+}
+
+async function sendSubAgentMessage(env, id, rawMessage) {
+  const subAgent = await getSubAgent(env, id);
+  if (!subAgent) return { ok: false, error: "Sub-agent not found." };
+  if (subAgent.status === "archived") return { ok: false, error: "Archived sub-agents cannot receive new messages." };
+  if (subAgent.status === "paused") return { ok: false, error: "Paused sub-agents must be resumed before receiving messages." };
+  const message = String(rawMessage || "").trim();
+  if (!message) return { ok: false, error: "Message is required." };
+
+  await setSubAgentStatusOnly(env, id, "working");
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    "insert into sub_agent_messages (id, sub_agent_id, role, content, created_at) values (?, ?, ?, ?, ?)"
+  ).bind(crypto.randomUUID(), id, "user", message, now).run();
+
+  const history = await listSubAgentMessages(env, id);
+  const reply = await runSubAgentModel(env, subAgent, history);
+  const repliedAt = new Date().toISOString();
+  await env.DB.prepare(
+    "insert into sub_agent_messages (id, sub_agent_id, role, content, created_at) values (?, ?, ?, ?, ?)"
+  ).bind(crypto.randomUUID(), id, "assistant", reply, repliedAt).run();
+  await env.DB.prepare("update sub_agents set status = ?, summary = ?, updated_at = ? where id = ?")
+    .bind("ready", deriveSubAgentSummary(subAgent, message, reply), repliedAt, id)
+    .run();
+
+  return { ok: true, subAgent: await getSubAgent(env, id), message: reply, messages: await listSubAgentMessages(env, id) };
+}
+
+async function refreshSubAgentSummary(env, id) {
+  const subAgent = await getSubAgent(env, id);
+  if (!subAgent) return { ok: false, error: "Sub-agent not found." };
+  const messages = await listSubAgentMessages(env, id);
+  const summary = await summarizeSubAgentMessages(env, subAgent, messages);
+  const now = new Date().toISOString();
+  await env.DB.prepare("update sub_agents set summary = ?, updated_at = ? where id = ?")
+    .bind(summary, now, id)
+    .run();
+  return { ok: true, summary, subAgent: await getSubAgent(env, id) };
+}
+
+async function setSubAgentStatusOnly(env, id, status) {
+  await env.DB.prepare("update sub_agents set status = ?, updated_at = ? where id = ?")
+    .bind(status, new Date().toISOString(), id)
+    .run();
+}
+
+async function runSubAgentModel(env, subAgent, history) {
+  if (!env.AI) return "I am configured as " + subAgent.name + ", but the Workers AI binding is not available for sub-agent responses.";
+  const modelSettings = { ...resolveModelSettings(env), model: subAgent.model || resolveModelSettings(env).model };
+  const transcript = history.slice(-12).map((message) => message.role.toUpperCase() + ": " + message.content).join("\\n\\n");
+  const output = await runModel(env, modelSettings, [
+    { role: "system", content: subAgentSystemInstruction(subAgent, env) },
+    {
+      role: "user",
+      content: ["Conversation so far:", transcript || "No prior messages.", "", "Respond as the sub-agent. Be concise, concrete, and include next action if useful."].join("\\n")
+    }
+  ]);
+  return normalizeModelOutput(output).trim() || "No response generated.";
+}
+
+async function summarizeSubAgentMessages(env, subAgent, messages) {
+  if (!env.AI || messages.length === 0) return deriveSubAgentSummary(subAgent);
+  const modelSettings = { ...resolveModelSettings(env), model: subAgent.model || resolveModelSettings(env).model };
+  const transcript = messages.slice(-20).map((message) => message.role.toUpperCase() + ": " + message.content).join("\\n\\n");
+  const output = await runModel(env, modelSettings, [
+    { role: "system", content: "Summarize this sub-agent state for an operator dashboard in two compact sentences." },
+    { role: "user", content: transcript }
+  ]);
+  return normalizeModelOutput(output).trim() || deriveSubAgentSummary(subAgent);
+}
+
+function subAgentSystemInstruction(subAgent, env) {
+  return [
+    subAgent.systemPrompt,
+    "You are a child Cloud Agent Instance coordinated by the main OpenThink personal agent.",
+    "Brain: " + subAgent.brain + ". Mode: " + subAgent.mode + ". Skills: " + (subAgent.skills.join(", ") || "none") + ".",
+    "Use Agents SDK semantics for chat/state. Use executor-oriented reasoning only when the main runtime exposes OPEN_THINK_EXECUTOR_MCP_URL.",
+    sanitizeHttpsUrl(env.OPEN_THINK_EXECUTOR_MCP_URL)
+      ? "Executor MCP is configured for execution-heavy work."
+      : "Executor MCP is not configured; plan execution but do not claim external executor access."
+  ].join("\\n");
+}
+
+function defaultSubAgentSystemPrompt(name, purpose, brain, skills, mode) {
+  return [
+    "You are " + name + ", a scoped Cloud Agent Instance sub-agent.",
+    "Purpose: " + purpose,
+    "Use the " + brain + " brain profile with " + (skills.join(", ") || "general reasoning") + ".",
+    "Mode: " + mode + ". Keep work bounded, report blockers, and hand concise summaries back to the main personal agent."
+  ].join("\\n");
+}
+
+function deriveSubAgentSummary(subAgent, lastUser, lastReply) {
+  if (lastUser && lastReply) return "Last task: " + compactText(lastUser, 90) + " Response: " + compactText(lastReply, 140);
+  return subAgent.summary || "Ready. " + subAgent.purpose;
+}
+
+function rowToSubAgent(row) {
+  return {
+    id: String(row.id || ""),
+    name: String(row.name || "Sub-agent"),
+    purpose: String(row.purpose || ""),
+    status: normalizeSubAgentStatus(row.status, "ready"),
+    mode: normalizeSubAgentMode(row.mode),
+    model: String(row.model || defaultModel),
+    brain: String(row.brain || "gbrain + gskills"),
+    systemPrompt: String(row.system_prompt || ""),
+    skills: parseJsonArray(row.skills_json),
+    summary: String(row.summary || ""),
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || ""),
+    messageCount: Number(row.message_count || 0)
+  };
+}
+
+function rowToSubAgentMessage(row) {
+  const role = String(row.role || "assistant");
+  return {
+    id: String(row.id || ""),
+    subAgentId: String(row.sub_agent_id || ""),
+    role: role === "user" || role === "system" ? role : "assistant",
+    content: String(row.content || ""),
+    createdAt: String(row.created_at || "")
+  };
+}
+
+function normalizeShortText(value, fallback) {
+  const text = String(value ?? "").trim();
+  return compactText(text || fallback, 96);
+}
+
+function normalizeLongText(value, fallback) {
+  const text = String(value ?? "").trim();
+  return compactText(text || fallback, 2000);
+}
+
+function normalizeStringArray(value) {
+  if (Array.isArray(value)) return value.map((item) => normalizeShortText(item, "")).filter(Boolean).slice(0, 12);
+  if (typeof value === "string" && value.trim()) return value.split(",").map((item) => normalizeShortText(item, "")).filter(Boolean).slice(0, 12);
+  return [];
+}
+
+function normalizeSubAgentMode(value) {
+  const mode = String(value ?? "").trim().toLowerCase();
+  if (mode === "agents-sdk" || mode === "executor" || mode === "hybrid") return mode;
+  return "hybrid";
+}
+
+function normalizeSubAgentStatus(value, fallback) {
+  const status = String(value ?? "").trim().toLowerCase();
+  if (status === "pause") return "paused";
+  if (status === "resume") return "ready";
+  if (status === "start") return "working";
+  if (status === "archive") return "archived";
+  if (status === "ready" || status === "working" || status === "paused" || status === "archived") return status;
+  return fallback;
+}
+
+function parseJsonArray(value) {
+  if (Array.isArray(value)) return normalizeStringArray(value);
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    return normalizeStringArray(JSON.parse(value));
+  } catch {
+    return normalizeStringArray(value);
+  }
+}
+
+function compactText(value, maxLength) {
+  const text = String(value || "").replace(/\\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return text.slice(0, Math.max(0, maxLength - 3)).trimEnd() + "...";
 }
 
 async function handleSecretsList(env) {
@@ -1746,6 +2406,18 @@ async function handleMcpTools(url, env) {
   if (server === "cloudflare") {
     return Response.json({ server: "cloudflare", tools: cloudflareMcpTools() });
   }
+  if (server === "executor") {
+    const record = executorMcpServer(env);
+    if (!record) {
+      return Response.json({ error: "OPEN_THINK_EXECUTOR_MCP_URL is not configured." }, { status: 503 });
+    }
+    const result = await mcpRequest(record.url, "tools/list", {}, executorMcpHeaders(env));
+    return Response.json({
+      server: record,
+      tools: result.result?.tools ?? [],
+      raw: result
+    });
+  }
 
   const record = await getMcpServer(env, server);
   if (!record) return Response.json({ error: "MCP server not found." }, { status: 404 });
@@ -1770,6 +2442,13 @@ async function handleMcpCall(request, env) {
       server: "cloudflare",
       tool: name,
       result: await callCloudflareMcpTool(name, args, env)
+    });
+  }
+  if (server === "executor") {
+    return Response.json({
+      server: executorMcpServerStatus(env),
+      tool: name,
+      result: await callExecutorMcpTool(name, args, env)
     });
   }
 
@@ -1808,6 +2487,17 @@ async function callCloudflareMcpTool(name, args, env) {
   }
 
   return { ok: false, error: "Unknown Cloudflare MCP tool." };
+}
+
+async function callExecutorMcpTool(name, args, env) {
+  const record = executorMcpServer(env);
+  if (!record) {
+    return { ok: false, error: "OPEN_THINK_EXECUTOR_MCP_URL is not configured." };
+  }
+  return mcpRequest(record.url, "tools/call", {
+    name,
+    arguments: args
+  }, executorMcpHeaders(env));
 }
 
 function cloudflareMcpTools() {
@@ -1864,13 +2554,14 @@ function cloudflareApiSearch(query) {
   };
 }
 
-async function mcpRequest(serverUrl, method, params) {
+async function mcpRequest(serverUrl, method, params, extraHeaders = {}) {
   const id = crypto.randomUUID();
   const response = await fetch(serverUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream"
+      Accept: "application/json, text/event-stream",
+      ...(extraHeaders || {})
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
@@ -2331,16 +3022,18 @@ async function listMcpServers(env) {
     error: env.OPEN_THINK_CF_API_TOKEN ? null : "Cloudflare runtime token secret is not configured.",
     builtIn: true
   };
+  const executor = executorMcpServerStatus(env);
 
-  if (!env.DB) return [builtIn];
+  if (!env.DB) return [builtIn, executor];
   await ensureMcpTable(env);
   const rows = await env.DB.prepare(
     "select id, name, url, transport, state, error, created_at, updated_at from mcp_servers order by created_at asc limit 50"
   ).all();
-  return [builtIn, ...(rows.results ?? [])];
+  return [builtIn, executor, ...(rows.results ?? [])];
 }
 
 async function getMcpServer(env, idOrName) {
+  if (idOrName === "executor") return executorMcpServer(env);
   if (!env.DB) return null;
   await ensureMcpTable(env);
   return env.DB.prepare(
@@ -2376,6 +3069,41 @@ function sanitizeMcpUrl(value) {
   } catch {
     return "";
   }
+}
+
+function sanitizeHttpsUrl(value) {
+  try {
+    const url = new URL(String(value ?? "").trim());
+    if (url.protocol !== "https:") return "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+function executorMcpServerStatus(env) {
+  const url = sanitizeHttpsUrl(env.OPEN_THINK_EXECUTOR_MCP_URL);
+  return {
+    id: "executor",
+    name: "Executor MCP",
+    url: url || "OPEN_THINK_EXECUTOR_MCP_URL",
+    transport: "streamable-http",
+    state: url ? "ready" : "not-configured",
+    error: url ? null : "Set OPEN_THINK_EXECUTOR_MCP_URL to enable executor.",
+    builtIn: true,
+    authTokenConfigured: Boolean(env.OPEN_THINK_EXECUTOR_AUTH_TOKEN)
+  };
+}
+
+function executorMcpServer(env) {
+  const server = executorMcpServerStatus(env);
+  return server.state === "ready" ? server : null;
+}
+
+function executorMcpHeaders(env) {
+  return env.OPEN_THINK_EXECUTOR_AUTH_TOKEN
+    ? { Authorization: "Bearer " + env.OPEN_THINK_EXECUTOR_AUTH_TOKEN }
+    : {};
 }
 
 function sanitizeSecretName(value) {
@@ -3083,6 +3811,7 @@ function renderAgentAppHtml(): string {
 
     <nav class="tabs" aria-label="Agent workspace">
       <button class="tab-button" type="button" data-tab="chat" aria-selected="true">Chat</button>
+      <button class="tab-button" type="button" data-tab="subagents" aria-selected="false">Sub-agents</button>
       <button class="tab-button" type="button" data-tab="mcp" aria-selected="false">MCP and Cloudflare</button>
       <button class="tab-button" type="button" data-tab="secrets" aria-selected="false">Secrets and Models</button>
       <button class="tab-button" type="button" data-tab="updates" aria-selected="false">Updates</button>
@@ -3124,6 +3853,27 @@ function renderAgentAppHtml(): string {
         <div class="panel-body stack" id="runtime-metrics"></div>
       </aside>
 
+      <aside class="panel" data-feature="runtime">
+        <div class="panel-header">
+          <div>
+            <h2>Hosted Agent SDK</h2>
+            <p>Plug external apps into this Worker without scraping the chat UI.</p>
+          </div>
+        </div>
+        <div class="panel-body stack">
+          <div class="status-grid">
+            <div class="metric"><span>Profile</span><strong>/cloud-agent/profile</strong></div>
+            <div class="metric"><span>Goal</span><strong>/goal</strong></div>
+            <div class="metric"><span>Sub-agents</span><strong>/subagents</strong></div>
+          </div>
+          <div class="notice">Use @open-think/core createHostedCloudAgentClient({ baseUrl: location.origin }) for health, manifest, /goal, sub-agent creation, messaging, controls, summaries, and setup reads.</div>
+          <div class="code">import { createHostedCloudAgentClient } from "@open-think/core";
+const agent = createHostedCloudAgentClient({ baseUrl: location.origin });
+await agent.goal("Ship a hosted workflow");
+await agent.createSubAgent({ name: "Scout", purpose: "Inspect deploy readiness", mode: "hybrid" });</div>
+        </div>
+      </aside>
+
       <section class="panel" data-feature="chat">
         <div class="panel-header">
           <div>
@@ -3138,12 +3888,56 @@ function renderAgentAppHtml(): string {
           <span id="chat-status-detail">Idle</span>
         </div>
         <form class="composer" id="chat-form">
-          <input id="chat-input" name="message" placeholder="Ask your agent to build, explain, plan, or operate..." autocomplete="off" />
+              <input id="chat-input" name="message" placeholder="Ask, or start with /goal to set an active objective..." autocomplete="off" />
           <div class="composer-actions">
             <button class="button button-primary" type="submit">Send</button>
             <button class="button" id="chat-stop" type="button" disabled>Stop</button>
           </div>
         </form>
+      </section>
+
+      <section class="panel" data-feature="subagents">
+        <div class="panel-header">
+          <div>
+            <h2>Sub-agents</h2>
+            <p>Create scoped Cloud Agent Instance children, control their state, review summaries, and interact with focused threads.</p>
+          </div>
+        </div>
+        <div class="panel-body stack">
+          <form class="stack" id="subagent-form">
+            <input id="subagent-name" placeholder="Research scout" value="Research scout" />
+            <textarea id="subagent-purpose" placeholder="Mission or responsibility">Investigate one bounded topic and report back with options, risks, and next steps.</textarea>
+            <div class="compact-row">
+              <select id="subagent-mode">
+                <option value="hybrid">Hybrid</option>
+                <option value="agents-sdk">Agents SDK</option>
+                <option value="executor">Executor</option>
+              </select>
+              <input id="subagent-brain" placeholder="gbrain + gskills" value="gbrain + gskills" />
+            </div>
+            <input id="subagent-skills" placeholder="research, planning, cloudflare" value="research, planning, cloudflare" />
+            <textarea id="subagent-system" placeholder="Optional custom system prompt"></textarea>
+            <button class="button button-primary" type="submit">Create sub-agent</button>
+          </form>
+          <div class="compact-row">
+            <select id="subagent-select"></select>
+            <button class="button" id="subagent-refresh" type="button">Refresh</button>
+          </div>
+          <div id="subagent-summary" class="notice">No sub-agent selected.</div>
+          <div class="button-row">
+            <button class="button" id="subagent-pause" type="button">Pause</button>
+            <button class="button" id="subagent-resume" type="button">Resume</button>
+            <button class="button" id="subagent-summarize" type="button">Summarize</button>
+            <button class="button" id="subagent-explore" type="button">Explore</button>
+            <button class="button" id="subagent-brief" type="button">Brief chat</button>
+            <button class="button" id="subagent-archive" type="button">Archive</button>
+          </div>
+          <div id="subagent-messages" class="code">Sub-agent messages appear here.</div>
+          <form class="stack" id="subagent-message-form">
+            <textarea id="subagent-message" placeholder="Ask this sub-agent for a focused pass..."></textarea>
+            <button class="button button-primary" type="submit">Send to sub-agent</button>
+          </form>
+        </div>
       </section>
 
       <section class="updates-workspace" data-feature="updates">
@@ -3338,7 +4132,7 @@ function renderAgentAppHtml(): string {
   </main>
 
   <script>
-    const state = { manifest: null, health: null, mcpServers: [], projects: [], threads: [], projectId: "", threadId: "", activeTab: "chat", chatAbortController: null };
+    const state = { manifest: null, health: null, mcpServers: [], projects: [], threads: [], projectId: "", threadId: "", activeTab: "chat", chatAbortController: null, subAgents: [], subAgentId: "" };
     const $ = (id) => document.getElementById(id);
 
     function escapeText(value) {
@@ -3484,17 +4278,19 @@ function renderAgentAppHtml(): string {
         metric("Queue", state.health.bindings.queue ? "Tasks ready" : "Missing"),
         metric("Vectorize", state.health.bindings.vectorize ? "Semantic memory bound" : "Missing"),
         metric("Chat", state.health.chat?.defaultTransport || "server-sent-events"),
+        metric("Sub-agents", state.health.subAgents?.persistence || "Configured"),
         metric("Cloudflare API", state.health.bindings.cloudflareApi ? "Runtime secret present" : "OAuth/token needed")
       ].join("");
       await loadProjects();
       await loadMemory();
       await loadCloudflare();
       await loadMcpServers();
+      await loadSubAgents();
       await loadSecrets();
       await loadUpdates();
       await loadTerminal();
       if (!$("chat-log").children.length) {
-        addMessage("agent", "I am online on Cloudflare. Ask me to work on code, capture memory, manage files, queue tasks, or inspect Cloudflare.");
+        addMessage("agent", "I am online on Cloudflare. Use /goal to set an active objective, or ask me to work on code, capture memory, manage files, queue tasks, or inspect Cloudflare.");
       }
       setActiveTab("chat");
     }
@@ -3535,6 +4331,87 @@ function renderAgentAppHtml(): string {
       for (const message of data.messages || []) {
         addMessage(message.role, message.content);
       }
+    }
+
+    async function loadSubAgents(preferredId) {
+      try {
+        const data = await jsonFetch("/subagents");
+        state.subAgents = data.subAgents || [];
+        state.subAgentId = preferredId || state.subAgentId || state.subAgents[0]?.id || "";
+        const select = $("subagent-select");
+        select.innerHTML = state.subAgents
+          .map((subAgent) => '<option value="' + escapeText(subAgent.id) + '">' + escapeText(subAgent.name + " / " + subAgent.status) + "</option>")
+          .join("");
+        select.value = state.subAgentId;
+        renderSelectedSubAgent();
+        if (state.subAgentId) await loadSubAgentMessages();
+      } catch (error) {
+        $("subagent-summary").className = "notice error";
+        $("subagent-summary").textContent = error.message;
+      }
+    }
+
+    function selectedSubAgent() {
+      return state.subAgents.find((subAgent) => subAgent.id === state.subAgentId) || null;
+    }
+
+    const subAgentExplorePrompt =
+      "Give me a current state report: what you know, what you still need, likely risks, and the next concrete action you recommend.";
+
+    function renderSelectedSubAgent() {
+      const subAgent = selectedSubAgent();
+      if (!subAgent) {
+        $("subagent-summary").className = "notice";
+        $("subagent-summary").textContent = "No sub-agent selected.";
+        $("subagent-messages").textContent = "Sub-agent messages appear here.";
+        return;
+      }
+      $("subagent-summary").className = "notice";
+      $("subagent-summary").innerHTML =
+        "<strong>" + escapeText(subAgent.name) + "</strong> " +
+        '<span class="tag">' + escapeText(subAgent.status) + "</span>" +
+        '<span class="tag">' + escapeText(subAgent.mode) + "</span><br>" +
+        escapeText(subAgent.purpose) +
+        "<br><br>" +
+        escapeText(subAgent.summary || "No summary yet.") +
+        "<br><br>" +
+        (subAgent.skills || []).slice(0, 4).map((skill) => '<span class="tag">' + escapeText(skill) + "</span>").join(" ");
+    }
+
+    async function loadSubAgentMessages() {
+      if (!state.subAgentId) return;
+      const data = await jsonFetch("/subagents/" + encodeURIComponent(state.subAgentId) + "/messages");
+      const lines = (data.messages || []).map((message) =>
+        "[" + message.role + "] " + message.content
+      );
+      $("subagent-messages").textContent = lines.join("\\n\\n") || "No messages yet.";
+    }
+
+    async function controlSubAgent(status) {
+      if (!state.subAgentId) return;
+      await jsonFetch("/subagents/" + encodeURIComponent(state.subAgentId) + "/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status })
+      });
+      await loadSubAgents(state.subAgentId);
+    }
+
+    async function summarizeSubAgent() {
+      if (!state.subAgentId) return;
+      await jsonFetch("/subagents/" + encodeURIComponent(state.subAgentId) + "/summary", { method: "POST" });
+      await loadSubAgents(state.subAgentId);
+    }
+
+    async function exploreSubAgent() {
+      if (!state.subAgentId) return;
+      await jsonFetch("/subagents/" + encodeURIComponent(state.subAgentId) + "/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: subAgentExplorePrompt })
+      });
+      await loadSubAgents(state.subAgentId);
+      await loadSubAgentMessages();
     }
 
     async function loadMemory() {
@@ -3995,6 +4872,64 @@ function renderAgentAppHtml(): string {
       if (!button) return;
       state.threadId = button.dataset.thread;
       await loadThreads();
+    });
+
+    $("subagent-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = await jsonFetch("/subagents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: $("subagent-name").value.trim(),
+          purpose: $("subagent-purpose").value.trim(),
+          mode: $("subagent-mode").value,
+          brain: $("subagent-brain").value.trim(),
+          skills: $("subagent-skills").value.split(",").map((skill) => skill.trim()).filter(Boolean),
+          systemPrompt: $("subagent-system").value.trim()
+        })
+      });
+      $("subagent-name").value = "Research scout";
+      $("subagent-purpose").value = "Investigate one bounded topic and report back with options, risks, and next steps.";
+      $("subagent-mode").value = "hybrid";
+      $("subagent-brain").value = "gbrain + gskills";
+      $("subagent-skills").value = "research, planning, cloudflare";
+      $("subagent-system").value = "";
+      await loadSubAgents(data.subAgent?.id);
+    });
+
+    $("subagent-select").addEventListener("change", async () => {
+      state.subAgentId = $("subagent-select").value;
+      renderSelectedSubAgent();
+      await loadSubAgentMessages();
+    });
+
+    $("subagent-refresh").addEventListener("click", () => loadSubAgents(state.subAgentId));
+    $("subagent-pause").addEventListener("click", () => controlSubAgent("paused"));
+    $("subagent-resume").addEventListener("click", () => controlSubAgent("ready"));
+    $("subagent-archive").addEventListener("click", () => controlSubAgent("archived"));
+    $("subagent-summarize").addEventListener("click", summarizeSubAgent);
+    $("subagent-explore").addEventListener("click", exploreSubAgent);
+    $("subagent-brief").addEventListener("click", () => {
+      const subAgent = selectedSubAgent();
+      if (!subAgent) return;
+      $("chat-input").value = "Review sub-agent " + subAgent.name + " (" + subAgent.status + "). Purpose: " + subAgent.purpose + "\\n\\nCurrent summary: " + subAgent.summary;
+      setActiveTab("chat");
+      $("chat-input").focus();
+    });
+
+    $("subagent-message-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!state.subAgentId) return;
+      const message = $("subagent-message").value.trim();
+      if (!message) return;
+      await jsonFetch("/subagents/" + encodeURIComponent(state.subAgentId) + "/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message })
+      });
+      $("subagent-message").value = "";
+      await loadSubAgents(state.subAgentId);
+      await loadSubAgentMessages();
     });
 
     document.querySelectorAll(".tab-button").forEach((button) => {

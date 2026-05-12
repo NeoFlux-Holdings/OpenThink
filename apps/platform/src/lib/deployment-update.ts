@@ -1,4 +1,5 @@
 import type { AutoSyncConfig, SyncAction, SyncResult, SyncStatus } from "@open-think/sync";
+import { Data, Effect } from "effect";
 import { renderAgentWorkerModule } from "./agent-worker-template";
 import {
   renderAgentsSdkWranglerJsonc,
@@ -157,11 +158,29 @@ export class DeploymentUpdateError extends Error {
   }
 }
 
+type DeploymentUpdateRepositoryOperation = "listDeployments" | "updateDeploymentStatus";
+
+export class DeploymentUpdateRepositoryError extends Data.TaggedError(
+  "DeploymentUpdateRepositoryError"
+)<{
+  readonly operation: DeploymentUpdateRepositoryOperation;
+  readonly deploymentId?: string;
+  readonly cause: unknown;
+}> {
+  override get message(): string {
+    const target = this.deploymentId ? ` for ${this.deploymentId}` : "";
+    const cause = errorMessage(this.cause, "unknown repository failure");
+    return `Deployment update repository ${this.operation}${target} failed: ${cause}`;
+  }
+}
+
 const defaultAutoUpdate: AutoSyncConfig = {
   enabled: false,
   direction: "bidirectional",
   intervalSeconds: 300
 };
+
+const automaticDeploymentUpdateConcurrency = 5;
 
 export function summarizeDeploymentUpdate(
   deployment: DeploymentRecord,
@@ -368,45 +387,116 @@ export async function runAutomaticDeploymentUpdatesFromEnv(
   env: Record<string, unknown> = process.env,
   limit = 100
 ): Promise<void> {
-  const deployments = await repository.list(limit);
-
-  await Promise.all(
-    deployments.map(async (deployment) => {
-      const metadata = readDeploymentUpdateMetadata(deployment.resourcePlan);
-      if (!metadata?.autoUpdate.enabled) return;
-
-      try {
-        const result = await runDeploymentUpdate({
-          deployment,
-          action: "reconcile",
-          env,
-          autoUpdate: metadata.autoUpdate
-        });
-        await repository.updateStatus(
-          deployment.id,
-          deployment.status,
-          result.resourcePlan
-        );
-      } catch (error) {
-        const target = readDeploymentUpdateTarget(deployment);
-        if (!target) return;
-        await repository.updateStatus(
-          deployment.id,
-          deployment.status,
-          withDeploymentUpdateMetadata(
-            deployment.resourcePlan,
-            buildDeploymentUpdateMetadata({
-              target,
-              autoUpdate: metadata.autoUpdate,
-              action: "reconcile",
-              env,
-              error: error instanceof Error ? error.message : "Automatic deployment update failed."
-            })
-          )
-        );
-      }
-    })
+  await Effect.runPromise(
+    runAutomaticDeploymentUpdatesFromEnvEffect(repository, env, limit)
   );
+}
+
+export function runAutomaticDeploymentUpdatesFromEnvEffect(
+  repository: DeploymentRepository,
+  env: Record<string, unknown> = process.env,
+  limit = 100
+): Effect.Effect<void, DeploymentUpdateRepositoryError> {
+  return Effect.gen(function* () {
+    const deployments = yield* repositoryOperation(
+      "listDeployments",
+      () => repository.list(limit)
+    );
+
+    yield* Effect.all(
+      deployments.map((deployment) =>
+        runAutomaticDeploymentUpdateForRecord(repository, deployment, env)
+      ),
+      {
+        concurrency: automaticDeploymentUpdateConcurrency,
+        discard: true
+      }
+    );
+  });
+}
+
+function runAutomaticDeploymentUpdateForRecord(
+  repository: DeploymentRepository,
+  deployment: DeploymentRecord,
+  env: Record<string, unknown>
+): Effect.Effect<void, DeploymentUpdateRepositoryError> {
+  const metadata = readDeploymentUpdateMetadata(deployment.resourcePlan);
+  if (!metadata?.autoUpdate.enabled) return Effect.void;
+
+  return Effect.tryPromise({
+    try: () =>
+      runDeploymentUpdate({
+        deployment,
+        action: "reconcile",
+        env,
+        autoUpdate: metadata.autoUpdate
+      }),
+    catch: (cause) => cause
+  }).pipe(
+    Effect.flatMap((result) =>
+      repositoryOperation(
+        "updateDeploymentStatus",
+        () => repository.updateStatus(deployment.id, deployment.status, result.resourcePlan),
+        deployment.id
+      )
+    ),
+    Effect.catchAll((error) =>
+      recordAutomaticDeploymentUpdateFailure(repository, deployment, metadata.autoUpdate, env, error)
+    )
+  );
+}
+
+function recordAutomaticDeploymentUpdateFailure(
+  repository: DeploymentRepository,
+  deployment: DeploymentRecord,
+  autoUpdate: AutoSyncConfig,
+  env: Record<string, unknown>,
+  error: unknown
+): Effect.Effect<void, DeploymentUpdateRepositoryError> {
+  const target = readDeploymentUpdateTarget(deployment);
+  if (!target) return Effect.void;
+
+  return repositoryOperation(
+    "updateDeploymentStatus",
+    () =>
+      repository.updateStatus(
+        deployment.id,
+        deployment.status,
+        withDeploymentUpdateMetadata(
+          deployment.resourcePlan,
+          buildDeploymentUpdateMetadata({
+            target,
+            autoUpdate,
+            action: "reconcile",
+            env,
+            error: errorMessage(error, "Automatic deployment update failed.")
+          })
+        )
+      ),
+    deployment.id
+  );
+}
+
+function repositoryOperation<A>(
+  operation: DeploymentUpdateRepositoryOperation,
+  run: () => Promise<A>,
+  deploymentId?: string
+): Effect.Effect<A, DeploymentUpdateRepositoryError> {
+  return Effect.tryPromise({
+    try: run,
+    catch: (cause) =>
+      new DeploymentUpdateRepositoryError({
+        operation,
+        cause,
+        ...(deploymentId ? { deploymentId } : {})
+      })
+  });
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error) return error;
+  return fallback;
 }
 
 interface GithubUpdateState {

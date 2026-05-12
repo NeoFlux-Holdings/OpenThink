@@ -1,4 +1,4 @@
-import { FormEvent, Suspense, lazy, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
 import {
@@ -21,7 +21,7 @@ const MarkdownRenderer = lazy(async () => {
   const { Streamdown } = await import("streamdown");
   return {
     default: function MarkdownRenderer({ children }: { children: string }) {
-      return <Streamdown>{children}</Streamdown>;
+      return <Streamdown controls={false}>{children}</Streamdown>;
     }
   };
 });
@@ -30,7 +30,9 @@ const clientConfig = {
   agentName: "Personal Agent",
   deploymentId: "local",
   defaultModel: "@cf/moonshotai/kimi-k2.6",
-  toolApprovalPolicy: "auto"
+  toolApprovalPolicy: "auto",
+  sdkPackage: "@open-think/core",
+  sdkFactory: "createHostedCloudAgentClient"
 } as const;
 
 function App() {
@@ -43,13 +45,30 @@ function App() {
 
 function Chat() {
   const [mcpServers, setMcpServers] = useState<Record<string, McpServerState>>({});
+  const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealth | null>(null);
   const [alwaysAllowedTools, setAlwaysAllowedTools] = useState<Set<string>>(() => readAlwaysAllowedTools());
+  const [subAgents, setSubAgents] = useState<SubAgent[]>([]);
+  const [selectedSubAgentId, setSelectedSubAgentId] = useState("");
+  const [subAgentMessages, setSubAgentMessages] = useState<SubAgentMessage[]>([]);
+  const [subAgentAction, setSubAgentAction] = useState<SubAgentAction | null>(null);
+  const [subAgentError, setSubAgentError] = useState<string | null>(null);
+  const [subAgentDraft, setSubAgentDraft] = useState<SubAgentDraft>(defaultSubAgentDraft);
+  const [sdkCopied, setSdkCopied] = useState(false);
   const autoApprovedApprovalIdsRef = useRef<Set<string>>(new Set());
-  const messageListEndRef = useRef<HTMLDivElement | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
+
+  const handleMcpUpdate = useCallback((servers: unknown) => {
+    setMcpServers((previous) => {
+      const next = normalizeMcpServers(servers);
+      return mcpServerSnapshotsEqual(previous, next) ? previous : next;
+    });
+  }, []);
+
   const agent = useAgent({
     agent: "PersonalChatAgent",
     name: "default",
-    onMcpUpdate: (servers) => setMcpServers(servers as Record<string, McpServerState>)
+    onMcpUpdate: handleMcpUpdate
   });
   const {
     messages,
@@ -66,6 +85,8 @@ function Chat() {
     isToolContinuation
   } = useAgentChat({
     agent,
+    autoContinueAfterToolResult: true,
+    resume: false,
     onToolCall: async ({ toolCall, addToolOutput }) => {
       if (toolCall.toolName !== "getUserTimezone") return;
 
@@ -79,15 +100,77 @@ function Chat() {
   const connectionState = readyStateLabel(agent.readyState);
   const connected = agent.readyState === WebSocket.OPEN;
   const busy = status === "submitted" || status === "streaming" || isStreaming || isServerStreaming;
-  const pendingApprovalCount = countPendingApprovals(messages);
   const mcpServerValues = Object.values(mcpServers);
   const mcpReadyCount = mcpServerValues.filter((server) => isMcpReady(server)).length;
   const alwaysAllowedToolCount = alwaysAllowedTools.size;
   const activityLabel = busy ? (isToolContinuation ? "Continuing tool" : "Streaming") : "Idle";
+  const approvalToolCallIds = useMemo(() => indexActivePendingApprovals(messages), [messages]);
+  const activeApprovalIds = useMemo(() => indexActiveApprovalIds(messages), [messages]);
+  const visibleMessages = useMemo(() => messages.filter(messageHasRenderableParts), [messages]);
+  const pendingApprovalCount = approvalToolCallIds.size;
+  const approvalErrorMessage = formatChatErrorMessage(error);
+  const retryIsSafe = !isProtocolRecoveryError(error);
+  const canRetry =
+    connected &&
+    !busy &&
+    retryIsSafe &&
+    pendingApprovalCount === 0 &&
+    messages.some((message) => message.role === "user");
+  const selectedSubAgent = subAgents.find((subAgent) => subAgent.id === selectedSubAgentId) ?? subAgents[0] ?? null;
+  const activeSubAgentCount = subAgents.filter((subAgent) => subAgent.status !== "archived").length;
+  const subAgentBusy = subAgentAction !== null;
+  const executionState = runtimeHealth?.cloudAgentInstance?.execution;
 
   useEffect(() => {
-    messageListEndRef.current?.scrollIntoView({ block: "end" });
+    const messageList = messageListRef.current;
+    if (!messageList || !stickToBottomRef.current) return;
+    messageList.scrollTop = messageList.scrollHeight;
   }, [messages, status, isStreaming, isServerStreaming]);
+
+  useEffect(() => {
+    void loadSubAgents();
+    void loadRuntimeHealth();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedSubAgent?.id) {
+      setSubAgentMessages([]);
+      return;
+    }
+    void loadSubAgentMessages(selectedSubAgent.id);
+  }, [selectedSubAgent?.id]);
+
+  function onMessageListScroll() {
+    const messageList = messageListRef.current;
+    if (!messageList) return;
+    stickToBottomRef.current = isNearScrollBottom(messageList);
+  }
+
+  const respondToToolApproval = useCallback(
+    (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => {
+      if (!approvalId || !toolCallId) return false;
+      if (approvalToolCallIds.get(approvalId) !== toolCallId) {
+        console.warn("[open-think] Ignoring stale tool approval " + approvalId + ".");
+        return false;
+      }
+      if (agent.readyState !== WebSocket.OPEN) {
+        console.warn("[open-think] Cannot send tool approval while the agent socket is not connected.");
+        return false;
+      }
+
+      clearError();
+      try {
+        void Promise.resolve(addToolApprovalResponse({ id: approvalId, approved })).catch((approvalError: unknown) => {
+          console.warn("[open-think] Failed to send tool approval.", approvalError);
+        });
+      } catch (approvalError) {
+        console.warn("[open-think] Failed to send tool approval.", approvalError);
+        return false;
+      }
+      return true;
+    },
+    [addToolApprovalResponse, agent.readyState, approvalToolCallIds, clearError]
+  );
 
   useEffect(() => {
     for (const message of messages) {
@@ -95,21 +178,26 @@ function Chat() {
         if (!isToolUIPart(part) || getToolPartState(part) !== "waiting-approval") continue;
 
         const approval = getToolApproval(part);
+        const toolCallId = getToolCallId(part);
         const toolName = getToolName(part);
-        if (!approval?.id || !alwaysAllowedTools.has(toolApprovalPreferenceKey(toolName))) continue;
+        if (!approval?.id || approvalToolCallIds.get(approval.id) !== toolCallId) continue;
+        if (!alwaysAllowedTools.has(toolApprovalPreferenceKey(toolName))) continue;
         if (autoApprovedApprovalIdsRef.current.has(approval.id)) continue;
 
-        autoApprovedApprovalIdsRef.current.add(approval.id);
-        addToolApprovalResponse({ id: approval.id, approved: true });
+        if (respondToToolApproval(approval.id, toolCallId, true)) {
+          autoApprovedApprovalIdsRef.current.add(approval.id);
+        }
       }
     }
-  }, [addToolApprovalResponse, alwaysAllowedTools, messages]);
+  }, [alwaysAllowedTools, approvalToolCallIds, messages, respondToToolApproval]);
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const input = event.currentTarget.elements.namedItem("message") as HTMLInputElement | null;
+    const input = event.currentTarget.elements.namedItem("message") as HTMLTextAreaElement | null;
     const text = input?.value.trim();
     if (!text || !connected || busy) return;
+    clearError();
+    stickToBottomRef.current = true;
     sendMessage({ text });
     if (input) input.value = "";
   }
@@ -122,8 +210,9 @@ function Chat() {
   }
 
   function onRetry() {
-    if (!connected || busy || messages.length === 0) return;
+    if (!canRetry) return;
     clearError();
+    stickToBottomRef.current = true;
     void Promise.resolve(regenerate()).catch((retryError: unknown) => {
       console.error("[useAgentChat] Retry failed", retryError);
     });
@@ -141,15 +230,168 @@ function Chat() {
     });
 
     if (approvalId && !autoApprovedApprovalIdsRef.current.has(approvalId)) {
-      autoApprovedApprovalIdsRef.current.add(approvalId);
-      addToolApprovalResponse({ id: approvalId, approved: true });
+      const toolCallId = approvalToolCallIds.get(approvalId);
+      if (respondToToolApproval(approvalId, toolCallId, true)) {
+        autoApprovedApprovalIdsRef.current.add(approvalId);
+      }
     }
+  }
+
+  function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
   }
 
   function onClearToolAllowlist() {
     const next = new Set<string>();
     writeAlwaysAllowedTools(next);
     setAlwaysAllowedTools(next);
+  }
+
+  async function loadSubAgents(preferredId?: string) {
+    try {
+      const data = await jsonFetch<{ available?: boolean; subAgents?: SubAgent[]; error?: string }>("/subagents");
+      const nextSubAgents = data.subAgents ?? [];
+      setSubAgents(nextSubAgents);
+      setSelectedSubAgentId((current) => preferredId || current || nextSubAgents[0]?.id || "");
+      setSubAgentError(data.available === false && data.error ? data.error : null);
+    } catch (loadError) {
+      setSubAgentError(loadError instanceof Error ? loadError.message : "Could not load sub-agents.");
+    }
+  }
+
+  async function loadRuntimeHealth() {
+    try {
+      const data = await jsonFetch<RuntimeHealth>("/health");
+      setRuntimeHealth(data);
+    } catch {
+      setRuntimeHealth(null);
+    }
+  }
+
+  async function loadSubAgentMessages(id: string) {
+    try {
+      const data = await jsonFetch<{ messages?: SubAgentMessage[] }>("/subagents/" + encodeURIComponent(id) + "/messages");
+      setSubAgentMessages(data.messages ?? []);
+    } catch (loadError) {
+      setSubAgentError(loadError instanceof Error ? loadError.message : "Could not load sub-agent messages.");
+    }
+  }
+
+  async function onCreateSubAgent(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubAgentAction("create");
+    setSubAgentError(null);
+    try {
+      const result = await jsonFetch<{ subAgent?: SubAgent }>("/subagents", {
+        method: "POST",
+        body: JSON.stringify({
+          ...subAgentDraft,
+          skills: subAgentDraft.skills.split(",").map((skill) => skill.trim()).filter(Boolean)
+        })
+      });
+      if (result.subAgent) {
+        setSubAgentDraft(defaultSubAgentDraft);
+        await loadSubAgents(result.subAgent.id);
+      }
+    } catch (createError) {
+      setSubAgentError(createError instanceof Error ? createError.message : "Could not create sub-agent.");
+    } finally {
+      setSubAgentAction(null);
+    }
+  }
+
+  async function controlSubAgent(status: SubAgentStatus) {
+    if (!selectedSubAgent) return;
+    setSubAgentAction(status === "paused" ? "pause" : status === "archived" ? "archive" : "resume");
+    setSubAgentError(null);
+    try {
+      await jsonFetch("/subagents/" + encodeURIComponent(selectedSubAgent.id) + "/control", {
+        method: "POST",
+        body: JSON.stringify({ status })
+      });
+      await loadSubAgents(selectedSubAgent.id);
+    } catch (controlError) {
+      setSubAgentError(controlError instanceof Error ? controlError.message : "Could not update sub-agent.");
+    } finally {
+      setSubAgentAction(null);
+    }
+  }
+
+  async function refreshSubAgentSummary() {
+    if (!selectedSubAgent) return;
+    setSubAgentAction("summarize");
+    setSubAgentError(null);
+    try {
+      await jsonFetch("/subagents/" + encodeURIComponent(selectedSubAgent.id) + "/summary", { method: "POST" });
+      await loadSubAgents(selectedSubAgent.id);
+    } catch (summaryError) {
+      setSubAgentError(summaryError instanceof Error ? summaryError.message : "Could not refresh summary.");
+    } finally {
+      setSubAgentAction(null);
+    }
+  }
+
+  async function sendSubAgentText(prompt: string, action: SubAgentAction = "send"): Promise<boolean> {
+    if (!selectedSubAgent) return false;
+    setSubAgentAction(action);
+    setSubAgentError(null);
+    try {
+      const result = await jsonFetch<{ subAgent?: SubAgent; messages?: SubAgentMessage[] }>(
+        "/subagents/" + encodeURIComponent(selectedSubAgent.id) + "/messages",
+        { method: "POST", body: JSON.stringify({ message: prompt }) }
+      );
+      if (result.messages) setSubAgentMessages(result.messages);
+      await loadSubAgents(result.subAgent?.id || selectedSubAgent.id);
+      return true;
+    } catch (sendError) {
+      setSubAgentError(sendError instanceof Error ? sendError.message : "Could not message sub-agent.");
+      return false;
+    } finally {
+      setSubAgentAction(null);
+    }
+  }
+
+  async function sendSubAgentPrompt(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const input = event.currentTarget.elements.namedItem("subAgentPrompt") as HTMLTextAreaElement | null;
+    const prompt = input?.value.trim();
+    if (!prompt) return;
+    if (await sendSubAgentText(prompt, "send")) {
+      if (input) input.value = "";
+    }
+  }
+
+  function exploreSelectedSubAgent() {
+    if (!selectedSubAgent || subAgentBusy) return;
+    void sendSubAgentText(subAgentExplorePrompt, "explore");
+  }
+
+  async function copySdkSnippet() {
+    const snippet = hostedAgentSdkSnippet();
+    try {
+      await navigator.clipboard.writeText(snippet);
+      setSdkCopied(true);
+      window.setTimeout(() => setSdkCopied(false), 1800);
+    } catch {
+      setSdkCopied(false);
+    }
+  }
+
+  function briefSubAgentInMainChat() {
+    if (!selectedSubAgent || !connected || busy) return;
+    sendMessage({
+      text:
+        "Review sub-agent " +
+        selectedSubAgent.name +
+        " (" +
+        selectedSubAgent.status +
+        "). Purpose: " +
+        selectedSubAgent.purpose +
+        "\n\nCurrent summary: " +
+        selectedSubAgent.summary
+    });
   }
 
   return (
@@ -179,32 +421,33 @@ function Chat() {
             <p>Streaming, message persistence, client tools, and approvals are handled by Cloudflare Agents SDK.</p>
           </div>
 
-          <div className="message-list" aria-live="polite" role="log">
-            {messages.length === 0 ? (
+          <div className="message-list" aria-live="polite" onScroll={onMessageListScroll} ref={messageListRef} role="log">
+            {visibleMessages.length === 0 ? (
               <div className="empty-state">
-                Ask for a plan, a Cloudflare operation, a memory lookup, or your browser timezone.
+                Use /goal to set an active objective, or ask for a plan, a Cloudflare operation, a memory lookup, or your browser timezone.
               </div>
             ) : (
-              messages.map((message) => (
+              visibleMessages.map((message) => (
                 <Message
-                  addToolApprovalResponse={addToolApprovalResponse}
+                  activeApprovalIds={activeApprovalIds}
                   approveToolAlways={approveToolAlways}
                   key={message.id}
                   message={message}
+                  respondToToolApproval={respondToToolApproval}
                 />
               ))
             )}
-            {error ? (
+            {approvalErrorMessage ? (
               <div className="error" role="alert">
-                <span>{error.message}</span>
+                <span>{approvalErrorMessage}</span>
                 <div className="button-row">
                   <button className="button button-compact" onClick={clearError} type="button">
                     Dismiss
                   </button>
-                  {messages.length > 0 ? (
+                  {messages.length > 0 && pendingApprovalCount === 0 ? (
                     <button
                       className="button button-compact"
-                      disabled={!connected || busy}
+                      disabled={!canRetry}
                       onClick={onRetry}
                       type="button"
                     >
@@ -214,16 +457,17 @@ function Chat() {
                 </div>
               </div>
             ) : null}
-            <div ref={messageListEndRef} />
           </div>
 
           <form className="composer" onSubmit={onSubmit}>
-            <input
+            <textarea
               aria-label="Message"
               autoComplete="off"
               disabled={!connected}
               name="message"
-              placeholder={connected ? "Ask your agent to inspect, remember, plan, or operate..." : "Reconnect to continue..."}
+              onKeyDown={onComposerKeyDown}
+              placeholder={connected ? "Ask, or start with /goal to set an active objective..." : "Reconnect to continue..."}
+              rows={1}
             />
             <button className="button button-primary" disabled={!connected || busy} type="submit">
               {busy ? "Working" : "Send"}
@@ -245,6 +489,11 @@ function Chat() {
             <Metric label="MCP servers" value={formatMcpStatus(mcpReadyCount, mcpServerValues.length)} />
             <Metric label="Approvals" value={pendingApprovalCount ? `${pendingApprovalCount} pending` : "None pending"} />
             <Metric label="Tool allowlist" value={formatToolAllowlist(alwaysAllowedToolCount)} />
+            <Metric label="Executor MCP" value={formatExecutionPlane(executionState?.executor)} />
+            <Metric label="Sandbox" value={formatExecutionPlane(executionState?.sandbox)} />
+            <Metric label="Containers" value={formatExecutionPlane(executionState?.containers)} />
+            <Metric label="Slash commands" value="/goal enabled" />
+            <Metric label="Sub-agents" value={subAgents.length ? `${activeSubAgentCount}/${subAgents.length} active` : "None"} />
             <div className="button-row">
               {busy ? (
                 <button className="button" onClick={stop} type="button">
@@ -268,6 +517,26 @@ function Chat() {
             <button className="button button-danger" disabled={messages.length === 0} onClick={onClearHistory} type="button">
               Clear history
             </button>
+            <HostedAgentPanel copied={sdkCopied} onCopy={copySdkSnippet} />
+            <SubAgentConsole
+              briefSubAgentInMainChat={briefSubAgentInMainChat}
+              connected={connected}
+              controlSubAgent={controlSubAgent}
+              draft={subAgentDraft}
+              error={subAgentError}
+              loading={subAgentBusy}
+              mainBusy={busy}
+              messages={subAgentMessages}
+              onCreate={onCreateSubAgent}
+              onDraftChange={setSubAgentDraft}
+              onExplore={exploreSelectedSubAgent}
+              onRefreshSummary={refreshSubAgentSummary}
+              onSelect={setSelectedSubAgentId}
+              onSendMessage={sendSubAgentPrompt}
+              selected={selectedSubAgent}
+              loadingAction={subAgentAction}
+              subAgents={subAgents}
+            />
           </div>
         </aside>
       </section>
@@ -276,23 +545,26 @@ function Chat() {
 }
 
 function Message({
-  addToolApprovalResponse,
+  activeApprovalIds,
   approveToolAlways,
-  message
+  message,
+  respondToToolApproval
 }: {
-  addToolApprovalResponse: (input: { id: string; approved: boolean }) => void;
+  activeApprovalIds: ReadonlySet<string>;
   approveToolAlways: (toolName: string, approvalId?: string) => void;
   message: UIMessage;
+  respondToToolApproval: (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => boolean;
 }) {
   return (
     <article className="message" data-role={message.role}>
       <small>{message.role}</small>
       {message.parts.map((part, index) => (
         <MessagePart
-          addToolApprovalResponse={addToolApprovalResponse}
+          activeApprovalIds={activeApprovalIds}
           approveToolAlways={approveToolAlways}
           key={partKey(part, index)}
           part={part}
+          respondToToolApproval={respondToToolApproval}
         />
       ))}
     </article>
@@ -300,13 +572,15 @@ function Message({
 }
 
 function MessagePart({
-  addToolApprovalResponse,
+  activeApprovalIds,
   approveToolAlways,
-  part
+  part,
+  respondToToolApproval
 }: {
-  addToolApprovalResponse: (input: { id: string; approved: boolean }) => void;
+  activeApprovalIds: ReadonlySet<string>;
   approveToolAlways: (toolName: string, approvalId?: string) => void;
   part: UIMessage["parts"][number];
+  respondToToolApproval: (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => boolean;
 }) {
   if (isTextUIPart(part)) {
     return (
@@ -325,15 +599,21 @@ function MessagePart({
     const input = getToolInput(part);
     const output = getToolOutput(part);
     const approval = getToolApproval(part);
+    const stateKey = String(state);
+    const isApprovalState = stateKey === "waiting-approval" || stateKey === "approved" || stateKey === "approval-responded";
+    const approvalIsActive = Boolean(approval?.id && activeApprovalIds.has(approval.id));
+    const displayState = isApprovalState && !approvalIsActive ? "expired-approval" : state;
+    const canRespondToApproval = Boolean(approval?.id && toolCallId && approvalIsActive);
+    const showToolPayload = displayState !== "expired-approval";
 
     return (
-      <div className="tool-part" data-state={state}>
+      <div className="tool-part" data-state={displayState}>
         <div className="tool-heading">
           <strong>{toolName}</strong>
-          <span className="pill" data-state={state}>{state}</span>
+          <span className="pill" data-state={displayState}>{displayState}</span>
         </div>
-        {input ? <pre>{formatJson(input)}</pre> : null}
-        {state === "waiting-approval" ? (
+        {input && showToolPayload ? <pre>{formatJson(input)}</pre> : null}
+        {state === "waiting-approval" && approvalIsActive ? (
           <>
             <p className="tool-note">
               {approval
@@ -343,15 +623,15 @@ function MessagePart({
             <div className="tool-actions">
               <button
                 className="button button-primary"
-                disabled={!approval?.id}
-                onClick={() => approval?.id && addToolApprovalResponse({ id: approval.id, approved: true })}
+                disabled={!canRespondToApproval}
+                onClick={() => respondToToolApproval(approval?.id, toolCallId, true)}
                 type="button"
               >
                 Approve once
               </button>
               <button
                 className="button"
-                disabled={!approval?.id}
+                disabled={!canRespondToApproval}
                 onClick={() => approveToolAlways(toolName, approval?.id)}
                 type="button"
               >
@@ -359,8 +639,8 @@ function MessagePart({
               </button>
               <button
                 className="button"
-                disabled={!approval?.id}
-                onClick={() => approval?.id && addToolApprovalResponse({ id: approval.id, approved: false })}
+                disabled={!canRespondToApproval}
+                onClick={() => respondToToolApproval(approval?.id, toolCallId, false)}
                 type="button"
               >
                 Reject
@@ -368,8 +648,13 @@ function MessagePart({
             </div>
           </>
         ) : null}
+        {isApprovalState && !approvalIsActive ? (
+          <p className="tool-note">
+            This approval belongs to an older turn and is no longer actionable. Send a new request to run it again.
+          </p>
+        ) : null}
         {state === "denied" ? <p className="tool-note">Rejected by owner.</p> : null}
-        {output ? (
+        {output && showToolPayload ? (
           <>
             <span className="tool-output-label">Output</span>
             <pre>{formatJson(output)}</pre>
@@ -388,6 +673,278 @@ function Metric({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
+  );
+}
+
+function HostedAgentPanel({ copied, onCopy }: { copied: boolean; onCopy: () => void }) {
+  const origin = typeof window === "undefined" ? "https://your-agent.workers.dev" : window.location.origin;
+  return (
+    <section className="hosted-agent-panel" aria-label="Hosted Cloud Agent developer flow">
+      <div className="section-heading">
+        <div>
+          <h3>Hosted Agent</h3>
+          <p>End-to-end Cloudflare agent surface for app developers and sub-agents.</p>
+        </div>
+        <span className="pill">SDK</span>
+      </div>
+      <ol className="flow-list">
+        {hostedFlowSteps.map((step) => (
+          <li className="flow-step" key={step.title}>
+            <span>{step.index}</span>
+            <div>
+              <strong>{step.title}</strong>
+              <small>{step.detail}</small>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <div className="sdk-card">
+        <div>
+          <strong>{clientConfig.sdkPackage}</strong>
+          <small>{clientConfig.sdkFactory}({"{ baseUrl }"})</small>
+        </div>
+        <button className="button button-compact" onClick={onCopy} type="button">
+          {copied ? "Copied" : "Copy SDK snippet"}
+        </button>
+      </div>
+      <pre className="sdk-snippet">{hostedAgentSdkSnippet(origin)}</pre>
+      <div className="customization-grid" aria-label="Customization options">
+        <Metric label="Personal agent" value="Prompt, brain, skills" />
+        <Metric label="Sub-agents" value="Purpose, mode, model" />
+        <Metric label="Runtime" value="Model, approvals, executor" />
+      </div>
+    </section>
+  );
+}
+
+function SubAgentConsole({
+  briefSubAgentInMainChat,
+  connected,
+  controlSubAgent,
+  draft,
+  error,
+  loading,
+  mainBusy,
+  messages,
+  onCreate,
+  onDraftChange,
+  onExplore,
+  onRefreshSummary,
+  onSelect,
+  onSendMessage,
+  selected,
+  loadingAction,
+  subAgents
+}: {
+  briefSubAgentInMainChat: () => void;
+  connected: boolean;
+  controlSubAgent: (status: SubAgentStatus) => void;
+  draft: SubAgentDraft;
+  error: string | null;
+  loading: boolean;
+  mainBusy: boolean;
+  messages: SubAgentMessage[];
+  onCreate: (event: FormEvent<HTMLFormElement>) => void;
+  onDraftChange: (draft: SubAgentDraft) => void;
+  onExplore: () => void;
+  onRefreshSummary: () => void;
+  onSelect: (id: string) => void;
+  onSendMessage: (event: FormEvent<HTMLFormElement>) => void;
+  selected: SubAgent | null;
+  loadingAction: SubAgentAction | null;
+  subAgents: SubAgent[];
+}) {
+  const readyCount = subAgents.filter((subAgent) => subAgent.status === "ready").length;
+  const workingCount = subAgents.filter((subAgent) => subAgent.status === "working").length;
+  const pausedCount = subAgents.filter((subAgent) => subAgent.status === "paused").length;
+
+  return (
+    <section className="subagent-console" aria-label="Sub-agent console">
+      <div className="section-heading">
+        <div>
+          <h3>Agent Workstreams</h3>
+          <p>Create focused child agents, track their state, and pull useful briefs back into chat.</p>
+        </div>
+        <span className="pill" data-state={subAgents.length ? "ready" : undefined}>{subAgents.length}</span>
+      </div>
+
+      {error ? <div className="inline-error">{error}</div> : null}
+
+      <div className="workstream-stats" aria-label="Sub-agent status counts">
+        <Metric label="Ready" value={String(readyCount)} />
+        <Metric label="Working" value={String(workingCount)} />
+        <Metric label="Paused" value={String(pausedCount)} />
+      </div>
+
+      <div className="subagent-templates" aria-label="Sub-agent templates">
+        {subAgentTemplates.map((template) => (
+          <button
+            className="subagent-template"
+            key={template.id}
+            onClick={() => onDraftChange({ ...draft, ...template.draft })}
+            type="button"
+          >
+            <strong>{template.label}</strong>
+            <small>{template.summary}</small>
+          </button>
+        ))}
+      </div>
+
+      <form className="subagent-create" onSubmit={onCreate}>
+        <strong className="form-kicker">New delegated workstream</strong>
+        <input
+          aria-label="Sub-agent name"
+          onChange={(event) => onDraftChange({ ...draft, name: event.target.value })}
+          placeholder="Sub-agent name"
+          value={draft.name}
+        />
+        <textarea
+          aria-label="Sub-agent purpose"
+          onChange={(event) => onDraftChange({ ...draft, purpose: event.target.value })}
+          placeholder="Mission or responsibility"
+          rows={2}
+          value={draft.purpose}
+        />
+        <div className="field-grid">
+          <select
+            aria-label="Sub-agent mode"
+            onChange={(event) => onDraftChange({ ...draft, mode: event.target.value as SubAgentMode })}
+            value={draft.mode}
+          >
+            <option value="hybrid">Hybrid</option>
+            <option value="agents-sdk">Agents SDK</option>
+            <option value="executor">Executor</option>
+          </select>
+          <input
+            aria-label="Sub-agent brain"
+            onChange={(event) => onDraftChange({ ...draft, brain: event.target.value })}
+            placeholder="Brain"
+            value={draft.brain}
+          />
+        </div>
+        <input
+          aria-label="Sub-agent model"
+          onChange={(event) => onDraftChange({ ...draft, model: event.target.value })}
+          placeholder="Model override, optional"
+          value={draft.model}
+        />
+        <input
+          aria-label="Sub-agent skills"
+          onChange={(event) => onDraftChange({ ...draft, skills: event.target.value })}
+          placeholder="skills, comma separated"
+          value={draft.skills}
+        />
+        <textarea
+          aria-label="Sub-agent system prompt"
+          onChange={(event) => onDraftChange({ ...draft, systemPrompt: event.target.value })}
+          placeholder="Optional custom system prompt"
+          rows={2}
+          value={draft.systemPrompt}
+        />
+        <button className="button button-primary button-block" disabled={loading || !draft.name.trim() || !draft.purpose.trim()} type="submit">
+          {loadingAction === "create" ? "Creating" : "Create sub-agent"}
+        </button>
+      </form>
+
+      <div className="subagent-roster" aria-label="Tracked sub-agents">
+        {subAgents.length ? (
+          subAgents.map((subAgent) => (
+            <button
+              className="subagent-row"
+              data-active={String(selected?.id === subAgent.id)}
+              key={subAgent.id}
+              onClick={() => onSelect(subAgent.id)}
+              type="button"
+            >
+              <span>
+                <strong>{subAgent.name}</strong>
+                <small>{subAgent.mode} / {subAgent.brain}</small>
+              </span>
+              <span className="pill" data-state={subAgent.status}>{subAgent.status}</span>
+            </button>
+          ))
+        ) : (
+          <div className="empty-state compact">No sub-agents yet.</div>
+        )}
+      </div>
+
+      {selected ? (
+        <div className="subagent-detail">
+          <div className="subagent-summary">
+            <div className="detail-title">
+              <div>
+                <strong>{selected.name}</strong>
+                <small>{selected.purpose}</small>
+              </div>
+              <span className="pill" data-state={selected.status}>{selected.status}</span>
+            </div>
+            <p>{selected.summary || "No summary yet."}</p>
+            <div className="subagent-chip-row" aria-label="Sub-agent traits">
+              <span className="pill">{selected.mode}</span>
+              <span className="pill">{selected.brain}</span>
+              <span className="pill">{selected.model}</span>
+              {selected.skills.slice(0, 3).map((skill) => (
+                <span className="pill" key={skill}>{skill}</span>
+              ))}
+            </div>
+          </div>
+          <div className="subagent-metadata" aria-label="Selected sub-agent metadata">
+            <Metric label="Messages" value={String(selected.messageCount ?? messages.length)} />
+            <Metric label="Updated" value={formatRelativeTime(selected.updatedAt)} />
+            <Metric label="Plane" value={formatSubAgentMode(selected.mode)} />
+          </div>
+          <div className="button-row">
+            <button className="button button-compact" disabled={loading || selected.status === "paused"} onClick={() => controlSubAgent("paused")} type="button">
+              {loadingAction === "pause" ? "Pausing" : "Pause"}
+            </button>
+            <button className="button button-compact" disabled={loading || selected.status === "ready"} onClick={() => controlSubAgent("ready")} type="button">
+              {loadingAction === "resume" ? "Resuming" : "Resume"}
+            </button>
+            <button className="button button-compact" disabled={loading} onClick={onRefreshSummary} type="button">
+              {loadingAction === "summarize" ? "Summarizing" : "Summarize"}
+            </button>
+            <button
+              className="button button-compact"
+              disabled={loading || selected.status === "paused" || selected.status === "archived"}
+              onClick={onExplore}
+              type="button"
+            >
+              {loadingAction === "explore" ? "Exploring" : "Explore"}
+            </button>
+            <button className="button button-compact" disabled={!connected || mainBusy} onClick={briefSubAgentInMainChat} type="button">
+              Brief chat
+            </button>
+            <button className="button button-compact button-danger" disabled={loading || selected.status === "archived"} onClick={() => controlSubAgent("archived")} type="button">
+              {loadingAction === "archive" ? "Archiving" : "Archive"}
+            </button>
+          </div>
+          <div className="subagent-messages" aria-live="polite">
+            {messages.length ? (
+              messages.slice(-6).map((message) => (
+                <div className="subagent-message" data-role={message.role} key={message.id}>
+                  <small>{message.role}</small>
+                  <p>{message.content}</p>
+                </div>
+              ))
+            ) : (
+              <div className="empty-state compact">Send a scoped prompt to start this sub-agent thread.</div>
+            )}
+          </div>
+          <form className="subagent-prompt" onSubmit={onSendMessage}>
+            <textarea
+              aria-label="Message selected sub-agent"
+              disabled={loading || selected.status === "paused" || selected.status === "archived"}
+              name="subAgentPrompt"
+              placeholder="Ask this sub-agent for a focused pass..."
+              rows={2}
+            />
+            <button className="button button-primary" disabled={loading || selected.status === "paused" || selected.status === "archived"} type="submit">
+              {loadingAction === "send" ? "Sending" : "Send"}
+            </button>
+          </form>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -445,14 +1002,257 @@ type McpServerState = {
   tools?: unknown[];
 };
 
-function countPendingApprovals(messages: UIMessage[]) {
-  return messages.reduce(
-    (total, message) =>
-      total +
-      message.parts.filter((part) => isToolUIPart(part) && getToolPartState(part) === "waiting-approval")
-        .length,
-    0
+type RuntimeHealth = {
+  cloudAgentInstance?: {
+    execution?: RuntimeExecutionState;
+  };
+};
+
+type RuntimeExecutionState = {
+  executor?: RuntimeExecutionPlane;
+  sandbox?: RuntimeExecutionPlane;
+  containers?: RuntimeExecutionPlane;
+};
+
+type RuntimeExecutionPlane = {
+  enabled?: boolean;
+  configured?: boolean;
+  status?: string;
+  default?: boolean;
+};
+
+type SubAgentStatus = "ready" | "working" | "paused" | "archived";
+type SubAgentMode = "agents-sdk" | "executor" | "hybrid";
+type SubAgentAction = "create" | "pause" | "resume" | "archive" | "summarize" | "send" | "explore";
+
+type SubAgentDraft = {
+  name: string;
+  purpose: string;
+  mode: SubAgentMode;
+  brain: string;
+  model: string;
+  skills: string;
+  systemPrompt: string;
+};
+
+const defaultSubAgentDraft: SubAgentDraft = {
+  name: "Research scout",
+  purpose: "Investigate one bounded topic and report back with options, risks, and next steps.",
+  mode: "hybrid",
+  brain: "gbrain + gskills",
+  model: "",
+  skills: "research, planning, cloudflare",
+  systemPrompt: ""
+};
+
+const subAgentTemplates = [
+  {
+    id: "research",
+    label: "Research Scout",
+    summary: "Read-only discovery, options, risks, next steps.",
+    draft: {
+      name: "Research scout",
+      purpose: "Investigate one bounded topic and report back with options, risks, and next steps.",
+      mode: "agents-sdk" as SubAgentMode,
+      brain: "gbrain + gskills",
+      model: "",
+      skills: "research, planning, cloudflare",
+      systemPrompt: "Stay read-only. Return concise findings, risks, open questions, and a recommended next action."
+    }
+  },
+  {
+    id: "builder",
+    label: "Builder",
+    summary: "Implementation workstream for scoped code or deploy tasks.",
+    draft: {
+      name: "Builder",
+      purpose: "Implement one scoped change, report touched surfaces, and ask before risky operations.",
+      mode: "hybrid" as SubAgentMode,
+      brain: "gbrain + executor",
+      model: "",
+      skills: "coding, tests, cloudflare, executor",
+      systemPrompt: "Own a narrow implementation slice. Prefer executor/sandbox for commands when available. Report files, tests, blockers, and next action."
+    }
+  },
+  {
+    id: "reviewer",
+    label: "Reviewer",
+    summary: "Quality gate for bugs, regressions, and missing tests.",
+    draft: {
+      name: "Reviewer",
+      purpose: "Review a completed change for correctness, regression risk, and verification gaps.",
+      mode: "agents-sdk" as SubAgentMode,
+      brain: "review gbrain",
+      model: "",
+      skills: "review, testing, security",
+      systemPrompt: "Lead with findings ordered by severity. Include exact evidence, residual risk, and recommended fixes."
+    }
+  },
+  {
+    id: "operator",
+    label: "Cloud Operator",
+    summary: "Cloudflare deploy, logs, bindings, and account operations.",
+    draft: {
+      name: "Cloud operator",
+      purpose: "Plan and execute Cloudflare operations with explicit approval for risky account changes.",
+      mode: "hybrid" as SubAgentMode,
+      brain: "gstack operator",
+      model: "",
+      skills: "cloudflare, mcp, deploy, observability",
+      systemPrompt: "Use Cloudflare MCP for read operations. Ask before writes, deploys, DNS, access, billing, or secret changes."
+    }
+  }
+] as const;
+
+const subAgentExplorePrompt =
+  "Give me a current state report: what you know, what you still need, likely risks, and the next concrete action you recommend.";
+
+const hostedFlowSteps = [
+  {
+    index: "01",
+    title: "Design",
+    detail: "Choose brain, prompts, skills, model, and approval policy."
+  },
+  {
+    index: "02",
+    title: "Deploy",
+    detail: "Publish the Worker, Agents SDK runtime, assets, and bindings."
+  },
+  {
+    index: "03",
+    title: "Plug in",
+    detail: "Use /health, /manifest, /goal, and /subagents from the SDK."
+  },
+  {
+    index: "04",
+    title: "Operate",
+    detail: "Delegate, summarize, approve tools, and update the agent."
+  }
+] as const;
+
+function hostedAgentSdkSnippet(baseUrl = "https://your-agent.workers.dev") {
+  return [
+    'import { createHostedCloudAgentClient } from "@open-think/core";',
+    "",
+    "const agent = createHostedCloudAgentClient({",
+    `  baseUrl: "${baseUrl}"`,
+    "});",
+    "",
+    "const profile = await agent.profile();",
+    'await agent.goal("Ship the first customer workflow");',
+    "const child = await agent.createSubAgent({",
+    '  name: "Deploy scout",',
+    '  purpose: "Check deploy readiness and summarize blockers",',
+    '  mode: "hybrid",',
+    '  skills: ["cloudflare", "release", "testing"]',
+    "});",
+    'await agent.sendSubAgentMessage(child.subAgent.id, "Inspect the current deploy path.");'
+  ].join("\n");
+}
+
+type SubAgent = {
+  id: string;
+  name: string;
+  purpose: string;
+  status: SubAgentStatus;
+  mode: SubAgentMode;
+  model: string;
+  brain: string;
+  systemPrompt: string;
+  skills: string[];
+  summary: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount?: number;
+};
+
+type SubAgentMessage = {
+  id: string;
+  subAgentId: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  createdAt: string;
+};
+
+function messageHasRenderableParts(message: UIMessage) {
+  return message.parts.some((part) => isTextUIPart(part) || isToolUIPart(part));
+}
+
+function isNearScrollBottom(element: HTMLElement) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight < 140;
+}
+
+function formatChatErrorMessage(error: Error | undefined) {
+  if (!error?.message) return null;
+  if (error.message.startsWith("Tool result is missing for tool call")) {
+    return "A previous tool call is incomplete in the saved history. It has been isolated; send the request again if needed.";
+  }
+  if (
+    error.message.includes("not found for approval request") ||
+    error.message.includes("Tool approval response references unknown approvalId")
+  ) {
+    return "A stale tool approval was left in saved history. It has been isolated; send a new request to run the operation again.";
+  }
+  if (error.message.includes("for missing text part") || error.message.includes("for missing reasoning part")) {
+    return "The stream sent an out-of-order protocol chunk. Dismiss this notice and send the next message when ready.";
+  }
+  return error.message;
+}
+
+function isProtocolRecoveryError(error: Error | undefined) {
+  const message = error?.message ?? "";
+  return (
+    message.startsWith("Tool result is missing for tool call") ||
+    message.includes("not found for approval request") ||
+    message.includes("Tool approval response references unknown approvalId") ||
+    message.includes("for missing text part") ||
+    message.includes("for missing reasoning part") ||
+    message.includes("Cannot read properties of undefined (reading 'state')")
   );
+}
+
+function indexActivePendingApprovals(messages: UIMessage[]) {
+  const index = new Map<string, string>();
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message) continue;
+    if (message.role === "user") return index;
+    if (message.role !== "assistant") continue;
+
+    for (const part of message.parts) {
+      if (!isToolUIPart(part) || getToolPartState(part) !== "waiting-approval") continue;
+
+      const approval = getToolApproval(part);
+      const toolCallId = getToolCallId(part);
+      if (approval?.id && toolCallId) index.set(approval.id, toolCallId);
+    }
+
+    return index;
+  }
+  return index;
+}
+
+function indexActiveApprovalIds(messages: UIMessage[]) {
+  const index = new Set<string>();
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message) continue;
+    if (message.role === "user") return index;
+    if (message.role !== "assistant") continue;
+
+    for (const part of message.parts) {
+      if (!isToolUIPart(part)) continue;
+      const state = getToolPartState(part);
+      const stateKey = String(state);
+      if (stateKey !== "waiting-approval" && stateKey !== "approved" && stateKey !== "approval-responded") continue;
+
+      const approval = getToolApproval(part);
+      if (approval?.id) index.add(approval.id);
+    }
+
+    return index;
+  }
+  return index;
 }
 
 function isMcpReady(server: McpServerState) {
@@ -476,9 +1276,83 @@ function formatToolAllowlist(count: number) {
   return `${count} local ${count === 1 ? "rule" : "rules"}`;
 }
 
+function formatSubAgentMode(mode: SubAgentMode) {
+  if (mode === "agents-sdk") return "Chat/state";
+  if (mode === "executor") return "Executor";
+  return "Hybrid";
+}
+
+function formatRelativeTime(value: string) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "Unknown";
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return "Just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return new Date(timestamp).toLocaleDateString();
+}
+
+function formatExecutionPlane(plane?: RuntimeExecutionPlane) {
+  if (!plane) return "Checking";
+  if (plane.enabled || plane.configured) return plane.status ? titleCase(plane.status) : "Enabled";
+  if (plane.default) return "Default pending";
+  return "Not configured";
+}
+
+function titleCase(value: string) {
+  return value
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
 function partKey(part: UIMessage["parts"][number], index: number) {
   if (isToolUIPart(part)) return getToolCallId(part);
   return String(index);
+}
+
+function mcpServerSnapshotsEqual(
+  left: Record<string, McpServerState>,
+  right: Record<string, McpServerState>
+) {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  if (leftKeys.length !== rightKeys.length) return false;
+
+  for (let index = 0; index < leftKeys.length; index += 1) {
+    const key = leftKeys[index];
+    const rightKey = rightKeys[index];
+    if (!key || key !== rightKey) return false;
+    const leftServer = left[key];
+    const rightServer = right[key];
+    if (!leftServer || !rightServer) return false;
+    if (leftServer.connectionState !== rightServer.connectionState) return false;
+    if (leftServer.state !== rightServer.state) return false;
+    if ((leftServer.tools?.length ?? 0) !== (rightServer.tools?.length ?? 0)) return false;
+  }
+
+  return true;
+}
+
+function normalizeMcpServers(value: unknown): Record<string, McpServerState> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, McpServerState>;
+}
+
+async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {})
+    }
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(typeof data.error === "string" ? data.error : "Request failed.");
+  }
+  return data as T;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

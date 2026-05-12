@@ -82,9 +82,16 @@ During reset, source restore preserves the current personal-agent brain/stack pr
 
 The deployed user-owned Worker serves the personal agent app at `/`. The first screen is the agent workspace, not a JSON manifest. It includes chat, runtime binding status, D1 memory, R2 file writes, Queue task submission, terminal handoff, Cloudflare control-plane status, and an advanced MCP control panel.
 
+The generated chat runtime supports `/goal`. Sending `/goal <objective>` asks the personal agent to turn that objective into an active goal brief with success criteria, milestones, next actions, risks, and a resume prompt. Sending `/goal` with no text asks the agent to review active goals from conversation and memory, then request the missing objective only if needed. The runtime also exposes `/goal` as a lightweight JSON capability endpoint.
+
+Each generated runtime also exposes a cloud agent instance profile in `/health`, `/manifest`, `/runtime/context`, and the `/goal` capability payload. That profile is the durable contract for chat runtime, brain preset, gskills, custom prompts, and execution planes. Cloudflare Agents SDK remains the primary runtime for chat streaming, resumable state, SQLite persistence, MCP orchestration, and human approvals. Executor is the default execution-plane contract, but it is only callable once `OPEN_THINK_EXECUTOR_MCP_URL` points to an HTTPS MCP endpoint. Optionally set `OPEN_THINK_EXECUTOR_AUTH_TOKEN` for bearer auth. When configured, the runtime advertises executor as the execution plane for code execution, filesystem work, browser automation, OpenAPI execution, subprocesses, and long-running workflow workers.
+
+The personal-agent UI includes a sub-agent console for scoped Cloud Agent Instance children. Sub-agents are tracked in D1 with their own purpose, brain, mode, system prompt, skills, status, summary, and message thread. The operator can create, pause, resume, archive, summarize, message, and brief the main chat from a selected sub-agent. Package-style Agents SDK deployments expose the same controls through built-in tools so the main agent can create or coordinate sub-agents conversationally.
+
 The MCP panel exposes:
 
 - Built-in Cloudflare MCP-compatible tools: `search` and `execute`.
+- Optional executor MCP tools when `OPEN_THINK_EXECUTOR_MCP_URL` is configured.
 - A server registry stored in the agent's D1 binding.
 - Tool discovery through `/mcp/tools`.
 - Tool calls through `/mcp/call`.
