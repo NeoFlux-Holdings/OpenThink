@@ -1203,7 +1203,10 @@ function shouldAutoRequireToolApproval(name: string, definition: ToolSet[string]
     typeof (definition as { description?: unknown }).description === "string"
       ? String((definition as { description?: unknown }).description)
       : "";
-  const normalizedName = name.replace(/^tool_[a-z0-9]+_/i, "").toLowerCase();
+  const normalizedName = name
+    .replace(/^tool_[a-z0-9]+_/i, "")
+    .replace(/[_-]+/g, " ")
+    .toLowerCase();
   const descriptionText = description.toLowerCase();
   const safeReadPattern =
     /\b(get|list|read|search|find|lookup|describe|inspect|query|fetch|check|status|audit|analyze|summarize)\b/;

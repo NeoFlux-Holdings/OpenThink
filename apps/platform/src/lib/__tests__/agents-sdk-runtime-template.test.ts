@@ -83,10 +83,12 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("<Streamdown controls={false}>");
     expect(client).toContain("<MarkdownRenderer>{part.text}</MarkdownRenderer>");
     expect(client).toContain('useAgentChat({');
-    expect(client).toContain("autoContinueAfterToolResult: true");
+    expect(client).toContain("autoContinueAfterToolResult: false");
     expect(client).toContain("resume: false");
     expect(client).not.toContain("sendAutomaticallyWhen");
     expect(client).not.toContain("approvalContinuationSignature");
+    expect(client).toContain("pendingManualContinuationRef");
+    expect(client).toContain("hasPendingClientTool");
     expect(client).toContain("mcpServerSnapshotsEqual");
     expect(client).toContain("addToolApprovalResponse({ id: approvalId, approved })");
     expect(client).toContain("indexActivePendingApprovals");
@@ -145,6 +147,7 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(source).toContain("this.mcp.getAITools()");
     expect(source).toContain("mcpToolsWithApprovalPolicy()");
     expect(source).toContain("shouldAutoRequireToolApproval");
+    expect(source).toContain('replace(/[_-]+/g, " ")');
     expect(source).toContain("safeReadPattern.test(normalizedName)");
     expect(source).toContain('type ToolApprovalPolicy = "auto" | "ask-every-time" | "allow-all"');
     expect(source).toContain("getUserTimezone: tool(");

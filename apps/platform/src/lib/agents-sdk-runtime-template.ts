@@ -1123,6 +1123,7 @@ function Chat() {
   const [subAgentDraft, setSubAgentDraft] = useState<SubAgentDraft>(defaultSubAgentDraft);
   const [sdkCopied, setSdkCopied] = useState(false);
   const autoApprovedApprovalIdsRef = useRef<Set<string>>(new Set());
+  const pendingManualContinuationRef = useRef(false);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
 
@@ -1153,7 +1154,7 @@ function Chat() {
     isToolContinuation
   } = useAgentChat({
     agent,
-    autoContinueAfterToolResult: true,
+    autoContinueAfterToolResult: false,
     resume: false,
     onToolCall: async ({ toolCall, addToolOutput }) => {
       if (toolCall.toolName !== "getUserTimezone") return;
@@ -1162,6 +1163,7 @@ function Chat() {
         toolCallId: toolCall.toolCallId,
         output: browserTimeContext()
       });
+      pendingManualContinuationRef.current = true;
     }
   });
 
@@ -1208,6 +1210,17 @@ function Chat() {
     void loadSubAgentMessages(selectedSubAgent.id);
   }, [selectedSubAgent?.id]);
 
+  useEffect(() => {
+    if (!pendingManualContinuationRef.current) return;
+    if (!connected || busy || pendingApprovalCount > 0 || hasPendingClientTool(messages)) return;
+
+    pendingManualContinuationRef.current = false;
+    stickToBottomRef.current = true;
+    void Promise.resolve(sendMessage()).catch((continuationError: unknown) => {
+      console.error("[useAgentChat] Manual tool continuation failed", continuationError);
+    });
+  }, [busy, connected, messages, pendingApprovalCount, sendMessage]);
+
   function onMessageListScroll() {
     const messageList = messageListRef.current;
     if (!messageList) return;
@@ -1231,6 +1244,7 @@ function Chat() {
         void Promise.resolve(addToolApprovalResponse({ id: approvalId, approved })).catch((approvalError: unknown) => {
           console.warn("[open-think] Failed to send tool approval.", approvalError);
         });
+        pendingManualContinuationRef.current = true;
       } catch (approvalError) {
         console.warn("[open-think] Failed to send tool approval.", approvalError);
         return false;
@@ -2277,6 +2291,18 @@ function isProtocolRecoveryError(error: Error | undefined) {
     message.includes("for missing reasoning part") ||
     message.includes("Cannot read properties of undefined (reading 'state')")
   );
+}
+
+function hasPendingClientTool(messages: UIMessage[]) {
+  const lastMessage = messages[messages.length - 1];
+  if (!lastMessage || lastMessage.role !== "assistant") return false;
+  return lastMessage.parts.some((part) => isToolUIPart(part) && rawToolPartState(part) === "input-available");
+}
+
+function rawToolPartState(part: UIMessage["parts"][number]) {
+  return typeof (part as { state?: unknown }).state === "string"
+    ? String((part as { state: string }).state)
+    : "";
 }
 
 function indexActivePendingApprovals(messages: UIMessage[]) {
@@ -3641,7 +3667,10 @@ function shouldAutoRequireToolApproval(name: string, definition: ToolSet[string]
     typeof (definition as { description?: unknown }).description === "string"
       ? String((definition as { description?: unknown }).description)
       : "";
-  const normalizedName = name.replace(/^tool_[a-z0-9]+_/i, "").toLowerCase();
+  const normalizedName = name
+    .replace(/^tool_[a-z0-9]+_/i, "")
+    .replace(/[_-]+/g, " ")
+    .toLowerCase();
   const descriptionText = description.toLowerCase();
   const safeReadPattern =
     /\\b(get|list|read|search|find|lookup|describe|inspect|query|fetch|check|status|audit|analyze|summarize)\\b/;
