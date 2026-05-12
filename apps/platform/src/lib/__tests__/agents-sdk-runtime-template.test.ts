@@ -100,6 +100,7 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("isProtocolRecoveryError");
     expect(client).toContain("indexActiveApprovalIds");
     expect(client).toContain("visibleMessages");
+    expect(client).toContain("compactVisibleMessages");
     expect(client).toContain("messageHasRenderableParts");
     expect(client).toContain('displayState !== "expired-approval"');
     expect(client).toContain("function onRetry()");

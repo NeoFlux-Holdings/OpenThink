@@ -1176,7 +1176,7 @@ function Chat() {
   const activityLabel = busy ? (isToolContinuation ? "Continuing tool" : "Streaming") : "Idle";
   const approvalToolCallIds = useMemo(() => indexActivePendingApprovals(messages), [messages]);
   const activeApprovalIds = useMemo(() => indexActiveApprovalIds(messages), [messages]);
-  const visibleMessages = useMemo(() => messages.filter(messageHasRenderableParts), [messages]);
+  const visibleMessages = useMemo(() => compactVisibleMessages(messages), [messages]);
   const pendingApprovalCount = approvalToolCallIds.size;
   const approvalErrorMessage = formatChatErrorMessage(error);
   const retryIsSafe = !isProtocolRecoveryError(error);
@@ -2258,6 +2258,24 @@ type SubAgentMessage = {
 
 function messageHasRenderableParts(message: UIMessage) {
   return message.parts.some((part) => isTextUIPart(part) || isToolUIPart(part));
+}
+
+function compactVisibleMessages(messages: UIMessage[]) {
+  const seenIds = new Set<string>();
+  const visible: UIMessage[] = [];
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || !messageHasRenderableParts(message)) continue;
+
+    const messageId = message.id || \`\${message.role}:\${index}\`;
+    if (seenIds.has(messageId)) continue;
+
+    seenIds.add(messageId);
+    visible.push(message);
+  }
+
+  return visible.reverse();
 }
 
 function isNearScrollBottom(element: HTMLElement) {
