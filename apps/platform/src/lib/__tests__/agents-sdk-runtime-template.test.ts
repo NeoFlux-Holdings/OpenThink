@@ -104,6 +104,11 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("isProtocolRecoveryError");
     expect(client).toContain("sessionApprovalIds");
     expect(client).toContain("compactMessageParts");
+    expect(client).toContain("ToolPartGroup");
+    expect(client).toContain("messageRenderBlocks");
+    expect(client).toContain("summarizeToolGroup");
+    expect(client).toContain('className="tool-group"');
+    expect(client).toContain("open={summary.defaultOpen ? true : undefined}");
     expect(client).toContain("shouldRenderMessagePart");
     expect(client).toContain("indexPendingApprovalIdsAfter");
     expect(client).toContain("PendingMessage");

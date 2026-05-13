@@ -646,19 +646,30 @@ function Message({
 }) {
   const parts = compactMessageParts(message.parts).filter(({ part }) => partHasVisibleContent(part, activeApprovalIds));
   if (parts.length === 0) return null;
+  const blocks = messageRenderBlocks(parts);
 
   return (
     <article className="message" data-role={message.role}>
       <small>{message.role}</small>
-      {parts.map(({ part, index }) => (
-        <MessagePart
-          activeApprovalIds={activeApprovalIds}
-          approveToolAlways={approveToolAlways}
-          key={partKey(part, index)}
-          part={part}
-          respondToToolApproval={respondToToolApproval}
-        />
-      ))}
+      {blocks.map((block) =>
+        block.kind === "tool-group" ? (
+          <ToolPartGroup
+            activeApprovalIds={activeApprovalIds}
+            approveToolAlways={approveToolAlways}
+            key={block.key}
+            parts={block.parts}
+            respondToToolApproval={respondToToolApproval}
+          />
+        ) : (
+          <MessagePart
+            activeApprovalIds={activeApprovalIds}
+            approveToolAlways={approveToolAlways}
+            key={block.key}
+            part={block.part}
+            respondToToolApproval={respondToToolApproval}
+          />
+        )
+      )}
     </article>
   );
 }
@@ -671,6 +682,46 @@ function shouldRenderMessagePart(part: UIMessage["parts"][number], activeApprova
 
   const stateKey = String(getToolPartState(part));
   return stateKey !== "waiting-approval" && stateKey !== "approved" && stateKey !== "approval-responded";
+}
+
+function ToolPartGroup({
+  activeApprovalIds,
+  approveToolAlways,
+  parts,
+  respondToToolApproval
+}: {
+  activeApprovalIds: ReadonlySet<string>;
+  approveToolAlways: (toolName: string, approvalId?: string) => void;
+  parts: MessagePartEntry[];
+  respondToToolApproval: (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => boolean;
+}) {
+  const summary = summarizeToolGroup(parts, activeApprovalIds);
+
+  return (
+    <details className="tool-group" data-state={summary.state} open={summary.defaultOpen ? true : undefined}>
+      <summary>
+        <span className="tool-group-title">
+          <strong>{summary.title}</strong>
+          <small>{summary.detail}</small>
+        </span>
+        <span className="tool-group-meta">
+          <span className="pill" data-state={summary.state}>{summary.state}</span>
+          <span className="tool-group-toggle">Details</span>
+        </span>
+      </summary>
+      <div className="tool-group-details">
+        {parts.map(({ part, index }) => (
+          <MessagePart
+            activeApprovalIds={activeApprovalIds}
+            approveToolAlways={approveToolAlways}
+            key={partKey(part, index)}
+            part={part}
+            respondToToolApproval={respondToToolApproval}
+          />
+        ))}
+      </div>
+    </details>
+  );
 }
 
 function MessagePart({
@@ -703,8 +754,8 @@ function MessagePart({
     const approval = getToolApproval(part);
     const stateKey = String(state);
     const isApprovalState = stateKey === "waiting-approval" || stateKey === "approved" || stateKey === "approval-responded";
-    const approvalIsActive = Boolean(approval?.id && activeApprovalIds.has(approval.id));
-    const displayState = isApprovalState && !approvalIsActive ? "expired-approval" : state;
+    const approvalIsActive = toolPartHasActiveApproval(part, activeApprovalIds);
+    const displayState = toolPartDisplayState(part, activeApprovalIds);
     const canRespondToApproval = Boolean(approval?.id && toolCallId && approvalIsActive);
     const showToolPayload = displayState !== "expired-approval";
 
@@ -1352,6 +1403,23 @@ type VisibleMessage = {
   message: UIMessage;
 };
 
+type MessagePartEntry = {
+  part: UIMessage["parts"][number];
+  index: number;
+};
+
+type MessageRenderBlock =
+  | {
+      kind: "part";
+      key: string;
+      part: UIMessage["parts"][number];
+    }
+  | {
+      kind: "tool-group";
+      key: string;
+      parts: MessagePartEntry[];
+    };
+
 type ToolContinuationCandidate = {
   signature: string;
   toolCallIds: Set<string>;
@@ -1413,9 +1481,104 @@ function partHasVisibleContent(part: UIMessage["parts"][number], activeApprovalI
   return false;
 }
 
+function messageRenderBlocks(parts: MessagePartEntry[]): MessageRenderBlock[] {
+  const blocks: MessageRenderBlock[] = [];
+  let toolGroup: MessagePartEntry[] = [];
+
+  const flushToolGroup = () => {
+    if (toolGroup.length === 0) return;
+    const groupParts = toolGroup;
+    toolGroup = [];
+    blocks.push({
+      kind: "tool-group",
+      key: "tool-group:" + groupParts.map(({ part, index }) => partKey(part, index)).join("|"),
+      parts: groupParts
+    });
+  };
+
+  for (const entry of parts) {
+    if (isToolUIPart(entry.part)) {
+      toolGroup.push(entry);
+      continue;
+    }
+
+    flushToolGroup();
+    blocks.push({
+      kind: "part",
+      key: partKey(entry.part, entry.index),
+      part: entry.part
+    });
+  }
+
+  flushToolGroup();
+  return blocks;
+}
+
+function summarizeToolGroup(parts: MessagePartEntry[], activeApprovalIds: ReadonlySet<string>) {
+  const names = uniqueToolNames(parts);
+  const states = parts.map(({ part }) => toolSummaryState(part, activeApprovalIds));
+  const activeApprovalCount = parts.filter(({ part }) => toolPartHasActiveApproval(part, activeApprovalIds)).length;
+  const state = toolGroupState(states, activeApprovalCount);
+  const countLabel = parts.length === 1 ? "1 tool call" : parts.length + " tool calls";
+  const title = parts.length === 1 ? names[0] ?? "Tool call" : countLabel;
+  const detailParts = [parts.length === 1 ? null : formatToolNameList(names), formatToolStateList(states)].filter(Boolean);
+
+  return {
+    defaultOpen: activeApprovalCount > 0,
+    detail: detailParts.join(" - ") || countLabel,
+    state,
+    title
+  };
+}
+
+function uniqueToolNames(parts: MessagePartEntry[]) {
+  return Array.from(new Set(parts.flatMap(({ part }) => (isToolUIPart(part) ? [getToolName(part)] : [])).filter(Boolean)));
+}
+
+function formatToolNameList(names: string[]) {
+  if (names.length <= 2) return names.join(", ");
+  return names.slice(0, 2).join(", ") + " +" + String(names.length - 2);
+}
+
+function formatToolStateList(states: string[]) {
+  const counts = new Map<string, number>();
+  for (const state of states) counts.set(state, (counts.get(state) ?? 0) + 1);
+  return Array.from(counts.entries())
+    .map(([state, count]) => (count === 1 ? state : String(count) + " " + state))
+    .join(", ");
+}
+
+function toolSummaryState(part: UIMessage["parts"][number], activeApprovalIds: ReadonlySet<string>) {
+  const displayState = toolPartDisplayState(part, activeApprovalIds);
+  if (displayState === "input-streaming" || displayState === "input-available") return "streaming";
+  if (displayState === "output-error") return "error";
+  if (displayState === "output-available" || displayState === "approval-responded" || displayState === "approved") return "complete";
+  return displayState;
+}
+
+function toolGroupState(states: string[], activeApprovalCount: number) {
+  if (activeApprovalCount > 0 || states.includes("waiting-approval")) return "waiting-approval";
+  if (states.includes("streaming")) return "streaming";
+  if (states.includes("error") || states.includes("denied")) return "error";
+  if (states.includes("expired-approval")) return "expired-approval";
+  if (states.length > 0 && states.every((state) => state === "complete")) return "complete";
+  return states[0] ?? "tool";
+}
+
+function toolPartDisplayState(part: UIMessage["parts"][number], activeApprovalIds: ReadonlySet<string>) {
+  const state = String((getToolPartState(part) ?? rawToolPartState(part)) || "tool");
+  const isApprovalState = state === "waiting-approval" || state === "approved" || state === "approval-responded";
+  return isApprovalState && !toolPartHasActiveApproval(part, activeApprovalIds) ? "expired-approval" : state;
+}
+
+function toolPartHasActiveApproval(part: UIMessage["parts"][number], activeApprovalIds: ReadonlySet<string>) {
+  const approval = getToolApproval(part);
+  return Boolean(approval?.id && activeApprovalIds.has(approval.id));
+}
+
 function compactMessageParts(parts: UIMessage["parts"]) {
   const seenToolIds = new Set<string>();
-  const visibleParts: Array<{ part: UIMessage["parts"][number]; index: number }> = [];
+  const visibleParts: MessagePartEntry[] = [];
 
   for (let index = parts.length - 1; index >= 0; index -= 1) {
     const part = parts[index];
