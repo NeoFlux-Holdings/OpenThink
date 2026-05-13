@@ -144,14 +144,14 @@ function Chat() {
 
   useEffect(() => {
     if (!pendingManualContinuationRef.current) return;
-    if (!connected || busy || pendingApprovalCount > 0 || hasPendingClientTool(messages)) return;
+    if (!connected || pendingApprovalCount > 0 || hasUnsettledToolInput(messages)) return;
 
     pendingManualContinuationRef.current = false;
     stickToBottomRef.current = true;
     void Promise.resolve(sendMessage()).catch((continuationError: unknown) => {
       console.error("[useAgentChat] Manual tool continuation failed", continuationError);
     });
-  }, [busy, connected, messages, pendingApprovalCount, sendMessage]);
+  }, [connected, messages, pendingApprovalCount, sendMessage]);
 
   function onMessageListScroll() {
     const messageList = messageListRef.current;
@@ -187,6 +187,8 @@ function Chat() {
   );
 
   useEffect(() => {
+    if (!connected) return;
+
     for (const message of messages) {
       for (const part of message.parts) {
         if (!isToolUIPart(part) || getToolPartState(part) !== "waiting-approval") continue;
@@ -203,7 +205,7 @@ function Chat() {
         }
       }
     }
-  }, [alwaysAllowedTools, approvalToolCallIds, messages, respondToToolApproval]);
+  }, [alwaysAllowedTools, approvalToolCallIds, connected, messages, respondToToolApproval]);
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1243,10 +1245,14 @@ function isProtocolRecoveryError(error: Error | undefined) {
   );
 }
 
-function hasPendingClientTool(messages: UIMessage[]) {
+function hasUnsettledToolInput(messages: UIMessage[]) {
   const lastMessage = messages[messages.length - 1];
   if (!lastMessage || lastMessage.role !== "assistant") return false;
-  return lastMessage.parts.some((part) => isToolUIPart(part) && rawToolPartState(part) === "input-available");
+  return lastMessage.parts.some((part) => {
+    if (!isToolUIPart(part)) return false;
+    const state = rawToolPartState(part);
+    return state === "input-streaming" || state === "input-available";
+  });
 }
 
 function rawToolPartState(part: UIMessage["parts"][number]) {
