@@ -237,6 +237,11 @@ button {
   background: #fff4e9;
 }
 
+.message[data-pending="true"] {
+  border-style: dashed;
+  color: var(--ink-soft);
+}
+
 .message small,
 .metric span {
   color: var(--muted);

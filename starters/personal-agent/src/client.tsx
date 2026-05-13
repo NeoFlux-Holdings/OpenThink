@@ -55,6 +55,7 @@ function Chat() {
   const [subAgentDraft, setSubAgentDraft] = useState<SubAgentDraft>(defaultSubAgentDraft);
   const [sdkCopied, setSdkCopied] = useState(false);
   const [sessionApprovalIds, setSessionApprovalIds] = useState<Set<string>>(() => new Set());
+  const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
   const autoApprovedApprovalIdsRef = useRef<Set<string>>(new Set());
   const pendingManualContinuationRef = useRef(false);
   const toolContinuationAttemptSignaturesRef = useRef<Set<string>>(new Set());
@@ -129,6 +130,10 @@ function Chat() {
   const activeSubAgentCount = subAgents.filter((subAgent) => subAgent.status !== "archived").length;
   const subAgentBusy = subAgentAction !== null;
   const executionState = runtimeHealth?.cloudAgentInstance?.execution;
+  const showAssistantWorkingPlaceholder =
+    busy &&
+    pendingApprovalCount === 0 &&
+    (pendingUserMessage !== null || visibleMessages.at(-1)?.role === "user");
 
   useEffect(() => {
     const messageList = messageListRef.current;
@@ -157,6 +162,17 @@ function Chat() {
     if (nextApprovalIds.size === 0) return;
     setSessionApprovalIds((previous) => (stringSetsEqual(previous, nextApprovalIds) ? previous : nextApprovalIds));
   }, [messages]);
+
+  useEffect(() => {
+    if (!pendingUserMessage) return;
+    if (messagesContainUserTextAfter(messages, pendingUserMessage.text, pendingUserMessage.startIndex)) {
+      setPendingUserMessage(null);
+    }
+  }, [messages, pendingUserMessage]);
+
+  useEffect(() => {
+    if (error) setPendingUserMessage(null);
+  }, [error]);
 
   useEffect(() => {
     if (!connected || pendingApprovalCount > 0 || hasUnsettledToolInput(messages)) return;
@@ -248,6 +264,10 @@ function Chat() {
     clearPendingToolContinuationMarker();
     sessionTurnStartIndexRef.current = messages.length;
     setSessionApprovalIds(new Set());
+    setPendingUserMessage({
+      text,
+      startIndex: messages.length
+    });
     stickToBottomRef.current = true;
     sendMessage({ text });
     if (input) input.value = "";
@@ -259,6 +279,7 @@ function Chat() {
       clearPendingToolContinuationMarker();
       sessionTurnStartIndexRef.current = null;
       setSessionApprovalIds(new Set());
+      setPendingUserMessage(null);
       clearHistory();
     }
   }
@@ -491,6 +512,8 @@ function Chat() {
                 />
               ))
             )}
+            {pendingUserMessage ? <PendingMessage role="user" text={pendingUserMessage.text} /> : null}
+            {showAssistantWorkingPlaceholder ? <PendingMessage role="assistant" text="Working..." /> : null}
             {approvalErrorMessage ? (
               <div className="error" role="alert">
                 <span>{approvalErrorMessage}</span>
@@ -1305,6 +1328,11 @@ type SubAgentMessage = {
   createdAt: string;
 };
 
+type PendingUserMessage = {
+  text: string;
+  startIndex: number;
+};
+
 type ToolContinuationCandidate = {
   signature: string;
   toolCallIds: Set<string>;
@@ -1319,6 +1347,32 @@ type ToolContinuationMarker = {
 
 function messageHasRenderableParts(message: UIMessage) {
   return message.parts.some((part) => isTextUIPart(part) || isToolUIPart(part));
+}
+
+function PendingMessage({
+  role,
+  text
+}: {
+  role: "user" | "assistant";
+  text: string;
+}) {
+  return (
+    <article className="message" data-pending="true" data-role={role}>
+      <small>{role}</small>
+      <div className="text-part">
+        <p>{text}</p>
+      </div>
+    </article>
+  );
+}
+
+function messagesContainUserTextAfter(messages: UIMessage[], text: string, startIndex: number) {
+  for (let messageIndex = startIndex; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex];
+    if (!message || message.role !== "user") continue;
+    if (message.parts.some((part) => isTextUIPart(part) && part.text.trim() === text)) return true;
+  }
+  return false;
 }
 
 function compactMessageParts(parts: UIMessage["parts"]) {
