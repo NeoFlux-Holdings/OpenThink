@@ -102,7 +102,9 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("stickToBottomRef");
     expect(client).toContain("onScroll={onMessageListScroll}");
     expect(client).toContain("isProtocolRecoveryError");
-    expect(client).toContain("indexActiveApprovalIds");
+    expect(client).toContain("sessionApprovalIds");
+    expect(client).toContain("compactMessageParts");
+    expect(client).toContain("indexPendingApprovalIdsAfter");
     expect(client).toContain("visibleMessages");
     expect(client).toContain("compactVisibleMessages");
     expect(client).toContain("messageHasRenderableParts");

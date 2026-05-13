@@ -1122,9 +1122,11 @@ function Chat() {
   const [subAgentError, setSubAgentError] = useState<string | null>(null);
   const [subAgentDraft, setSubAgentDraft] = useState<SubAgentDraft>(defaultSubAgentDraft);
   const [sdkCopied, setSdkCopied] = useState(false);
+  const [sessionApprovalIds, setSessionApprovalIds] = useState<Set<string>>(() => new Set());
   const autoApprovedApprovalIdsRef = useRef<Set<string>>(new Set());
   const pendingManualContinuationRef = useRef(false);
   const toolContinuationAttemptSignaturesRef = useRef<Set<string>>(new Set());
+  const sessionTurnStartIndexRef = useRef<number | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
 
@@ -1176,8 +1178,11 @@ function Chat() {
   const mcpReadyCount = mcpServerValues.filter((server) => isMcpReady(server)).length;
   const alwaysAllowedToolCount = alwaysAllowedTools.size;
   const activityLabel = busy ? (isToolContinuation ? "Continuing tool" : "Streaming") : "Idle";
-  const approvalToolCallIds = useMemo(() => indexActivePendingApprovals(messages), [messages]);
-  const activeApprovalIds = useMemo(() => indexActiveApprovalIds(messages), [messages]);
+  const approvalToolCallIds = useMemo(
+    () => indexActivePendingApprovals(messages, sessionApprovalIds),
+    [messages, sessionApprovalIds]
+  );
+  const activeApprovalIds = sessionApprovalIds;
   const visibleMessages = useMemo(() => compactVisibleMessages(messages), [messages]);
   const pendingApprovalCount = approvalToolCallIds.size;
   const approvalErrorMessage = formatChatErrorMessage(error);
@@ -1211,6 +1216,15 @@ function Chat() {
     }
     void loadSubAgentMessages(selectedSubAgent.id);
   }, [selectedSubAgent?.id]);
+
+  useEffect(() => {
+    const startIndex = sessionTurnStartIndexRef.current;
+    if (startIndex === null) return;
+
+    const nextApprovalIds = indexPendingApprovalIdsAfter(messages, startIndex);
+    if (nextApprovalIds.size === 0) return;
+    setSessionApprovalIds((previous) => (stringSetsEqual(previous, nextApprovalIds) ? previous : nextApprovalIds));
+  }, [messages]);
 
   useEffect(() => {
     if (!connected || pendingApprovalCount > 0 || hasUnsettledToolInput(messages)) return;
@@ -1300,6 +1314,8 @@ function Chat() {
     if (!text || !connected || busy) return;
     clearError();
     clearPendingToolContinuationMarker();
+    sessionTurnStartIndexRef.current = messages.length;
+    setSessionApprovalIds(new Set());
     stickToBottomRef.current = true;
     sendMessage({ text });
     if (input) input.value = "";
@@ -1309,6 +1325,8 @@ function Chat() {
     if (messages.length === 0) return;
     if (window.confirm("Clear this agent's persisted conversation history?")) {
       clearPendingToolContinuationMarker();
+      sessionTurnStartIndexRef.current = null;
+      setSessionApprovalIds(new Set());
       clearHistory();
     }
   }
@@ -1662,7 +1680,7 @@ function Message({
   return (
     <article className="message" data-role={message.role}>
       <small>{message.role}</small>
-      {message.parts.map((part, index) => (
+      {compactMessageParts(message.parts).map(({ part, index }) => (
         <MessagePart
           activeApprovalIds={activeApprovalIds}
           approveToolAlways={approveToolAlways}
@@ -2356,6 +2374,28 @@ function messageHasRenderableParts(message: UIMessage) {
   return message.parts.some((part) => isTextUIPart(part) || isToolUIPart(part));
 }
 
+function compactMessageParts(parts: UIMessage["parts"]) {
+  const seenToolIds = new Set<string>();
+  const visibleParts: Array<{ part: UIMessage["parts"][number]; index: number }> = [];
+
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index];
+    if (!part) continue;
+
+    if (isToolUIPart(part)) {
+      const toolPartId = getToolCallId(part) ?? getToolApproval(part)?.id;
+      if (toolPartId) {
+        if (seenToolIds.has(toolPartId)) continue;
+        seenToolIds.add(toolPartId);
+      }
+    }
+
+    visibleParts.push({ part, index });
+  }
+
+  return visibleParts.reverse();
+}
+
 function latestRenderableAssistantTurn(messages: UIMessage[]) {
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const message = messages[messageIndex];
@@ -2485,7 +2525,7 @@ function rawToolPartState(part: UIMessage["parts"][number]) {
     : "";
 }
 
-function indexActivePendingApprovals(messages: UIMessage[]) {
+function indexActivePendingApprovals(messages: UIMessage[], activeApprovalIds: ReadonlySet<string>) {
   const index = new Map<string, string>();
   const turn = latestRenderableAssistantTurn(messages);
   if (!turn) return index;
@@ -2495,27 +2535,36 @@ function indexActivePendingApprovals(messages: UIMessage[]) {
 
     const approval = getToolApproval(part);
     const toolCallId = getToolCallId(part);
+    if (!approval?.id || !activeApprovalIds.has(approval.id)) continue;
     if (approval?.id && toolCallId) index.set(approval.id, toolCallId);
   }
 
   return index;
 }
 
-function indexActiveApprovalIds(messages: UIMessage[]) {
+function indexPendingApprovalIdsAfter(messages: UIMessage[], startIndex: number) {
   const index = new Set<string>();
-  const turn = latestRenderableAssistantTurn(messages);
-  if (!turn) return index;
+  for (let messageIndex = startIndex; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex];
+    if (!message || message.role !== "assistant") continue;
 
-  for (const part of turn.message.parts) {
-    if (!isToolUIPart(part)) continue;
-    const stateKey = String(getToolPartState(part));
-    if (stateKey !== "waiting-approval" && stateKey !== "approved" && stateKey !== "approval-responded") continue;
+    for (const part of message.parts) {
+      if (!isToolUIPart(part) || getToolPartState(part) !== "waiting-approval") continue;
 
-    const approval = getToolApproval(part);
-    if (approval?.id) index.add(approval.id);
+      const approval = getToolApproval(part);
+      if (approval?.id) index.add(approval.id);
+    }
   }
 
   return index;
+}
+
+function stringSetsEqual(left: ReadonlySet<string>, right: ReadonlySet<string>) {
+  if (left.size !== right.size) return false;
+  for (const value of left) {
+    if (!right.has(value)) return false;
+  }
+  return true;
 }
 
 function isMcpReady(server: McpServerState) {
@@ -2571,7 +2620,7 @@ function titleCase(value: string) {
 }
 
 function partKey(part: UIMessage["parts"][number], index: number) {
-  if (isToolUIPart(part)) return getToolCallId(part);
+  if (isToolUIPart(part)) return (getToolCallId(part) ?? getToolApproval(part)?.id ?? "tool") + ":" + index;
   return String(index);
 }
 
