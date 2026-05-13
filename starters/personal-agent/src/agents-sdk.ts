@@ -193,14 +193,25 @@ function sanitizeMessagesForModel(messages: UIMessage[]): UIMessage[] {
   return messages
     .map((message, messageIndex) => {
       const shouldKeepToolParts = messageIndex === activeApprovalIndex;
-      if (shouldKeepToolParts || !message.parts.some(isToolUIPart)) return message;
+      if (shouldKeepToolParts || !message.parts.some(isToolUIPart)) return stripEmptyTextParts(message);
 
       return {
         ...message,
-        parts: message.parts.filter((part) => !isToolUIPart(part))
+        parts: message.parts.filter((part) => !isToolUIPart(part) && !isEmptyTextPart(part))
       } as UIMessage;
     })
     .filter((message) => message.role === "user" || message.parts.length > 0);
+}
+
+function stripEmptyTextParts(message: UIMessage): UIMessage {
+  return {
+    ...message,
+    parts: message.parts.filter((part) => !isEmptyTextPart(part))
+  } as UIMessage;
+}
+
+function isEmptyTextPart(part: UIMessage["parts"][number]) {
+  return isTextUIPart(part) && part.text.trim().length === 0;
 }
 
 function activeApprovalContinuationIndex(messages: UIMessage[]) {

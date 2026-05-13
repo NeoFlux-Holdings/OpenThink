@@ -196,6 +196,8 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(source).toContain("waitForMcpConnections = { timeout: 10_000 }");
     expect(source).toContain("prepareModelMessages(this.messages)");
     expect(source).toContain("sanitizeMessagesForModel");
+    expect(source).toContain("stripEmptyTextParts");
+    expect(source).toContain("isEmptyTextPart");
     expect(source).toContain("activeApprovalContinuationIndex");
     expect(source).toContain("ignoreIncompleteToolCalls: true");
     expect(source).not.toContain("pruneMessages");
