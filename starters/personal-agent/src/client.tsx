@@ -609,10 +609,15 @@ function Message({
   message: UIMessage;
   respondToToolApproval: (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => boolean;
 }) {
+  const parts = compactMessageParts(message.parts).filter(({ part }) => {
+    return shouldRenderMessagePart(part, activeApprovalIds);
+  });
+  if (parts.length === 0) return null;
+
   return (
     <article className="message" data-role={message.role}>
       <small>{message.role}</small>
-      {compactMessageParts(message.parts).map(({ part, index }) => (
+      {parts.map(({ part, index }) => (
         <MessagePart
           activeApprovalIds={activeApprovalIds}
           approveToolAlways={approveToolAlways}
@@ -623,6 +628,16 @@ function Message({
       ))}
     </article>
   );
+}
+
+function shouldRenderMessagePart(part: UIMessage["parts"][number], activeApprovalIds: ReadonlySet<string>) {
+  if (!isToolUIPart(part)) return true;
+
+  const approval = getToolApproval(part);
+  if (!approval?.id || activeApprovalIds.has(approval.id)) return true;
+
+  const stateKey = String(getToolPartState(part));
+  return stateKey !== "waiting-approval" && stateKey !== "approved" && stateKey !== "approval-responded";
 }
 
 function MessagePart({

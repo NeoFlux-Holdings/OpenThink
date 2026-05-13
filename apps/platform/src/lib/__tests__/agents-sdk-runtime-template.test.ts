@@ -104,6 +104,7 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("isProtocolRecoveryError");
     expect(client).toContain("sessionApprovalIds");
     expect(client).toContain("compactMessageParts");
+    expect(client).toContain("shouldRenderMessagePart");
     expect(client).toContain("indexPendingApprovalIdsAfter");
     expect(client).toContain("visibleMessages");
     expect(client).toContain("compactVisibleMessages");
