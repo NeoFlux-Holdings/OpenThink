@@ -109,6 +109,9 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("summarizeToolGroup");
     expect(client).toContain('className="tool-group"');
     expect(client).toContain("open={summary.defaultOpen ? true : undefined}");
+    expect(client).toContain("emptyResponseRetrySignaturesRef");
+    expect(client).toContain("latestUserTextMessageAfter");
+    expect(client).toContain("No assistant output was received. Retry the last message when ready.");
     expect(client).toContain("shouldRenderMessagePart");
     expect(client).toContain("indexPendingApprovalIdsAfter");
     expect(client).toContain("PendingMessage");

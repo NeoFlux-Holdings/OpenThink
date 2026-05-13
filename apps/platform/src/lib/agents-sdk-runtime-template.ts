@@ -1219,7 +1219,9 @@ function Chat() {
   const [sessionApprovalIds, setSessionApprovalIds] = useState<Set<string>>(() => new Set());
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
   const [pendingAssistantMessage, setPendingAssistantMessage] = useState<PendingAssistantMessage | null>(null);
+  const [emptyResponseMessage, setEmptyResponseMessage] = useState<string | null>(null);
   const autoApprovedApprovalIdsRef = useRef<Set<string>>(new Set());
+  const emptyResponseRetrySignaturesRef = useRef<Set<string>>(new Set());
   const pendingManualContinuationRef = useRef(false);
   const toolContinuationAttemptSignaturesRef = useRef<Set<string>>(new Set());
   const sessionTurnStartIndexRef = useRef<number | null>(null);
@@ -1282,6 +1284,7 @@ function Chat() {
   const visibleMessages = useMemo(() => compactVisibleMessages(messages, activeApprovalIds), [messages, activeApprovalIds]);
   const pendingApprovalCount = approvalToolCallIds.size;
   const approvalErrorMessage = formatChatErrorMessage(error);
+  const chatErrorMessage = approvalErrorMessage ?? emptyResponseMessage;
   const retryIsSafe = !isProtocolRecoveryError(error);
   const canRetry =
     connected &&
@@ -1335,6 +1338,7 @@ function Chat() {
     if (!pendingAssistantMessage) return;
     if (messagesContainRenderableAssistantAfter(messages, pendingAssistantMessage.startIndex, sessionApprovalIds)) {
       setPendingAssistantMessage(null);
+      setEmptyResponseMessage(null);
     }
   }, [messages, pendingAssistantMessage, sessionApprovalIds]);
 
@@ -1343,6 +1347,39 @@ function Chat() {
     setPendingUserMessage(null);
     setPendingAssistantMessage(null);
   }, [error]);
+
+  useEffect(() => {
+    if (!pendingAssistantMessage || busy || !connected || error || pendingApprovalCount > 0) return;
+    if (messagesContainRenderableAssistantAfter(messages, pendingAssistantMessage.startIndex, sessionApprovalIds)) return;
+
+    const retryTarget = latestUserTextMessageAfter(messages, pendingAssistantMessage.startIndex);
+    if (!retryTarget) {
+      setPendingAssistantMessage(null);
+      setEmptyResponseMessage("No assistant output was received. Send the request again if needed.");
+      return;
+    }
+
+    const retrySignature = retryTarget.id + ":" + retryTarget.text;
+    if (emptyResponseRetrySignaturesRef.current.has(retrySignature)) {
+      setPendingAssistantMessage(null);
+      setEmptyResponseMessage("No assistant output was received. Retry the last message when ready.");
+      return;
+    }
+
+    const retryTimer = window.setTimeout(() => {
+      if (agent.readyState !== WebSocket.OPEN) return;
+      emptyResponseRetrySignaturesRef.current.add(retrySignature);
+      setEmptyResponseMessage(null);
+      stickToBottomRef.current = true;
+      void Promise.resolve(sendMessage({ text: retryTarget.text, messageId: retryTarget.id })).catch((retryError: unknown) => {
+        console.error("[useAgentChat] Empty response retry failed", retryError);
+        setPendingAssistantMessage(null);
+        setEmptyResponseMessage("No assistant output was received, and the automatic retry failed. Retry the last message when ready.");
+      });
+    }, 900);
+
+    return () => window.clearTimeout(retryTimer);
+  }, [agent.readyState, busy, connected, error, messages, pendingAssistantMessage, pendingApprovalCount, sendMessage, sessionApprovalIds]);
 
   useEffect(() => {
     if (!connected || pendingApprovalCount > 0 || hasUnsettledToolInput(messages)) return;
@@ -1431,6 +1468,7 @@ function Chat() {
     const text = input?.value.trim();
     if (!text || !connected || busy) return;
     clearError();
+    setEmptyResponseMessage(null);
     clearPendingToolContinuationMarker();
     sessionTurnStartIndexRef.current = messages.length;
     setSessionApprovalIds(new Set());
@@ -1454,6 +1492,8 @@ function Chat() {
       setSessionApprovalIds(new Set());
       setPendingUserMessage(null);
       setPendingAssistantMessage(null);
+      setEmptyResponseMessage(null);
+      emptyResponseRetrySignaturesRef.current.clear();
       clearHistory();
     }
   }
@@ -1461,6 +1501,12 @@ function Chat() {
   function onRetry() {
     if (!canRetry) return;
     clearError();
+    setEmptyResponseMessage(null);
+    const retryTarget = latestUserTextMessageAfter(messages, 0);
+    if (retryTarget) {
+      emptyResponseRetrySignaturesRef.current.delete(retryTarget.id + ":" + retryTarget.text);
+      setPendingAssistantMessage({ startIndex: retryTarget.index });
+    }
     stickToBottomRef.current = true;
     void Promise.resolve(regenerate()).catch((retryError: unknown) => {
       console.error("[useAgentChat] Retry failed", retryError);
@@ -1688,11 +1734,18 @@ function Chat() {
             )}
             {pendingUserMessage ? <PendingMessage role="user" text={pendingUserMessage.text} /> : null}
             {showAssistantPlaceholder ? <PendingMessage role="assistant" text={assistantPlaceholderText} /> : null}
-            {approvalErrorMessage ? (
+            {chatErrorMessage ? (
               <div className="error" role="alert">
-                <span>{approvalErrorMessage}</span>
+                <span>{chatErrorMessage}</span>
                 <div className="button-row">
-                  <button className="button button-compact" onClick={clearError} type="button">
+                  <button
+                    className="button button-compact"
+                    onClick={() => {
+                      clearError();
+                      setEmptyResponseMessage(null);
+                    }}
+                    type="button"
+                  >
                     Dismiss
                   </button>
                   {messages.length > 0 && pendingApprovalCount === 0 ? (
@@ -2635,6 +2688,25 @@ function messagesContainRenderableAssistantAfter(
     if (compactMessageParts(message.parts).some(({ part }) => partHasVisibleContent(part, activeApprovalIds))) return true;
   }
   return false;
+}
+
+function latestUserTextMessageAfter(messages: UIMessage[], startIndex: number) {
+  for (let messageIndex = messages.length - 1; messageIndex >= startIndex; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message || message.role !== "user") continue;
+
+    const text = messageTextContent(message);
+    if (text) return { id: message.id, index: messageIndex, text };
+  }
+  return null;
+}
+
+function messageTextContent(message: UIMessage) {
+  return message.parts
+    .filter(isTextUIPart)
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join("\\n\\n");
 }
 
 function partHasVisibleContent(part: UIMessage["parts"][number], activeApprovalIds: ReadonlySet<string>) {
