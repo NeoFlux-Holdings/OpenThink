@@ -4,6 +4,7 @@ import { routeAgentRequest, type AgentContext } from "agents";
 import {
   convertToModelMessages,
   generateText,
+  isTextUIPart,
   isToolUIPart,
   stepCountIs,
   streamText,
@@ -203,11 +204,31 @@ function sanitizeMessagesForModel(messages: UIMessage[]): UIMessage[] {
 }
 
 function activeApprovalContinuationIndex(messages: UIMessage[]) {
-  const lastMessageIndex = messages.length - 1;
-  const lastMessage = messages[lastMessageIndex];
-  if (!lastMessage || lastMessage.role !== "assistant") return -1;
+  let lastMessageIndex = -1;
+  let lastMessage: UIMessage | undefined;
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message) continue;
+    if (message.role === "user") return -1;
+    if (message.role === "assistant" && message.parts.length > 0) {
+      lastMessageIndex = messageIndex;
+      lastMessage = message;
+      break;
+    }
+  }
+  if (!lastMessage) return -1;
 
   const toolParts = lastMessage.parts.filter(isToolUIPart);
+  if (toolParts.length === 0) return -1;
+
+  const lastToolPartIndex = lastMessage.parts.reduce((lastIndex, part, partIndex) => {
+    return isToolUIPart(part) ? partIndex : lastIndex;
+  }, -1);
+  const hasAssistantTextAfterLastTool = lastMessage.parts.slice(lastToolPartIndex + 1).some((part) => {
+    return isTextUIPart(part) && part.text.trim().length > 0;
+  });
+  if (hasAssistantTextAfterLastTool) return -1;
+
   const hasApprovalResponse = toolParts.some((part) => {
     const state = uiToolState(part);
     return state === "approval-responded" || state === "approved";

@@ -1124,6 +1124,7 @@ function Chat() {
   const [sdkCopied, setSdkCopied] = useState(false);
   const autoApprovedApprovalIdsRef = useRef<Set<string>>(new Set());
   const pendingManualContinuationRef = useRef(false);
+  const toolContinuationAttemptSignaturesRef = useRef<Set<string>>(new Set());
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
 
@@ -1211,10 +1212,23 @@ function Chat() {
   }, [selectedSubAgent?.id]);
 
   useEffect(() => {
-    if (!pendingManualContinuationRef.current) return;
     if (!connected || pendingApprovalCount > 0 || hasUnsettledToolInput(messages)) return;
 
+    const recoveredContinuationSignature = pendingManualContinuationRef.current
+      ? ""
+      : toolContinuationSignature(messages);
+    if (!pendingManualContinuationRef.current && !recoveredContinuationSignature) return;
+    if (
+      recoveredContinuationSignature &&
+      toolContinuationAttemptSignaturesRef.current.has(recoveredContinuationSignature)
+    ) {
+      return;
+    }
+
     pendingManualContinuationRef.current = false;
+    if (recoveredContinuationSignature) {
+      toolContinuationAttemptSignaturesRef.current.add(recoveredContinuationSignature);
+    }
     stickToBottomRef.current = true;
     void Promise.resolve(sendMessage()).catch((continuationError: unknown) => {
       console.error("[useAgentChat] Manual tool continuation failed", continuationError);
@@ -2262,6 +2276,18 @@ function messageHasRenderableParts(message: UIMessage) {
   return message.parts.some((part) => isTextUIPart(part) || isToolUIPart(part));
 }
 
+function latestRenderableAssistantTurn(messages: UIMessage[]) {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message) continue;
+    if (message.role === "user") return null;
+    if (message.role === "assistant" && messageHasRenderableParts(message)) {
+      return { message, messageIndex };
+    }
+  }
+  return null;
+}
+
 function compactVisibleMessages(messages: UIMessage[]) {
   const seenIds = new Set<string>();
   const visible: UIMessage[] = [];
@@ -2314,13 +2340,54 @@ function isProtocolRecoveryError(error: Error | undefined) {
 }
 
 function hasUnsettledToolInput(messages: UIMessage[]) {
-  const lastMessage = messages[messages.length - 1];
-  if (!lastMessage || lastMessage.role !== "assistant") return false;
-  return lastMessage.parts.some((part) => {
+  const turn = latestRenderableAssistantTurn(messages);
+  if (!turn) return false;
+  return turn.message.parts.some((part) => {
     if (!isToolUIPart(part)) return false;
-    const state = rawToolPartState(part);
+    const state = toolPartStateKey(part);
     return state === "input-streaming" || state === "input-available";
   });
+}
+
+function toolContinuationSignature(messages: UIMessage[]) {
+  const turn = latestRenderableAssistantTurn(messages);
+  if (!turn) return "";
+
+  const settledToolKeys: string[] = [];
+  let lastToolPartIndex = -1;
+
+  for (let partIndex = 0; partIndex < turn.message.parts.length; partIndex += 1) {
+    const part = turn.message.parts[partIndex];
+    if (!part || !isToolUIPart(part)) continue;
+
+    const state = toolPartStateKey(part);
+    if (state === "input-streaming" || state === "input-available" || state === "waiting-approval") return "";
+    if (!isSettledToolState(state)) continue;
+
+    lastToolPartIndex = partIndex;
+    const toolName = getToolName(part);
+    const toolCallId = getToolCallId(part);
+    const approval = getToolApproval(part);
+    settledToolKeys.push(toolName + ":" + (toolCallId ?? approval?.id ?? partIndex) + ":" + state);
+  }
+
+  if (settledToolKeys.length === 0 || lastToolPartIndex < 0) return "";
+
+  const hasAssistantTextAfterLastTool = turn.message.parts.slice(lastToolPartIndex + 1).some((part) => {
+    return isTextUIPart(part) && part.text.trim().length > 0;
+  });
+  if (hasAssistantTextAfterLastTool) return "";
+
+  const messageId = turn.message.id || "assistant:" + turn.messageIndex;
+  return messageId + ":" + settledToolKeys.join("|");
+}
+
+function isSettledToolState(state: string) {
+  return state === "approval-responded" || state === "approved" || state === "output-available" || state === "output-error";
+}
+
+function toolPartStateKey(part: UIMessage["parts"][number]) {
+  return rawToolPartState(part) || String(getToolPartState(part) ?? "");
 }
 
 function rawToolPartState(part: UIMessage["parts"][number]) {
@@ -2331,45 +2398,34 @@ function rawToolPartState(part: UIMessage["parts"][number]) {
 
 function indexActivePendingApprovals(messages: UIMessage[]) {
   const index = new Map<string, string>();
-  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-    const message = messages[messageIndex];
-    if (!message) continue;
-    if (message.role === "user") return index;
-    if (message.role !== "assistant") continue;
+  const turn = latestRenderableAssistantTurn(messages);
+  if (!turn) return index;
 
-    for (const part of message.parts) {
-      if (!isToolUIPart(part) || getToolPartState(part) !== "waiting-approval") continue;
+  for (const part of turn.message.parts) {
+    if (!isToolUIPart(part) || getToolPartState(part) !== "waiting-approval") continue;
 
-      const approval = getToolApproval(part);
-      const toolCallId = getToolCallId(part);
-      if (approval?.id && toolCallId) index.set(approval.id, toolCallId);
-    }
-
-    return index;
+    const approval = getToolApproval(part);
+    const toolCallId = getToolCallId(part);
+    if (approval?.id && toolCallId) index.set(approval.id, toolCallId);
   }
+
   return index;
 }
 
 function indexActiveApprovalIds(messages: UIMessage[]) {
   const index = new Set<string>();
-  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-    const message = messages[messageIndex];
-    if (!message) continue;
-    if (message.role === "user") return index;
-    if (message.role !== "assistant") continue;
+  const turn = latestRenderableAssistantTurn(messages);
+  if (!turn) return index;
 
-    for (const part of message.parts) {
-      if (!isToolUIPart(part)) continue;
-      const state = getToolPartState(part);
-      const stateKey = String(state);
-      if (stateKey !== "waiting-approval" && stateKey !== "approved" && stateKey !== "approval-responded") continue;
+  for (const part of turn.message.parts) {
+    if (!isToolUIPart(part)) continue;
+    const stateKey = String(getToolPartState(part));
+    if (stateKey !== "waiting-approval" && stateKey !== "approved" && stateKey !== "approval-responded") continue;
 
-      const approval = getToolApproval(part);
-      if (approval?.id) index.add(approval.id);
-    }
-
-    return index;
+    const approval = getToolApproval(part);
+    if (approval?.id) index.add(approval.id);
   }
+
   return index;
 }
 
@@ -2504,6 +2560,7 @@ import { routeAgentRequest, type AgentContext } from "agents";
 import {
   convertToModelMessages,
   generateText,
+  isTextUIPart,
   isToolUIPart,
   stepCountIs,
   streamText,
@@ -2613,11 +2670,31 @@ function sanitizeMessagesForModel(messages: UIMessage[]): UIMessage[] {
 }
 
 function activeApprovalContinuationIndex(messages: UIMessage[]) {
-  const lastMessageIndex = messages.length - 1;
-  const lastMessage = messages[lastMessageIndex];
-  if (!lastMessage || lastMessage.role !== "assistant") return -1;
+  let lastMessageIndex = -1;
+  let lastMessage: UIMessage | undefined;
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message) continue;
+    if (message.role === "user") return -1;
+    if (message.role === "assistant" && message.parts.length > 0) {
+      lastMessageIndex = messageIndex;
+      lastMessage = message;
+      break;
+    }
+  }
+  if (!lastMessage) return -1;
 
   const toolParts = lastMessage.parts.filter(isToolUIPart);
+  if (toolParts.length === 0) return -1;
+
+  const lastToolPartIndex = lastMessage.parts.reduce((lastIndex, part, partIndex) => {
+    return isToolUIPart(part) ? partIndex : lastIndex;
+  }, -1);
+  const hasAssistantTextAfterLastTool = lastMessage.parts.slice(lastToolPartIndex + 1).some((part) => {
+    return isTextUIPart(part) && part.text.trim().length > 0;
+  });
+  if (hasAssistantTextAfterLastTool) return -1;
+
   const hasApprovalResponse = toolParts.some((part) => {
     const state = uiToolState(part);
     return state === "approval-responded" || state === "approved";
