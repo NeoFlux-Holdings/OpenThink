@@ -108,7 +108,11 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("indexPendingApprovalIdsAfter");
     expect(client).toContain("PendingMessage");
     expect(client).toContain("messagesContainUserTextAfter");
-    expect(client).toContain("showAssistantWorkingPlaceholder");
+    expect(client).toContain("pendingAssistantMessage");
+    expect(client).toContain("messagesContainRenderableAssistantAfter");
+    expect(client).toContain("partHasVisibleContent");
+    expect(client).toContain("messageVisibleSignature");
+    expect(client).toContain("No assistant output was received.");
     expect(client).toContain("visibleMessages");
     expect(client).toContain("compactVisibleMessages");
     expect(client).toContain("messageHasRenderableParts");

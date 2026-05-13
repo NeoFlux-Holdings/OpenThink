@@ -1129,6 +1129,7 @@ function Chat() {
   const [sdkCopied, setSdkCopied] = useState(false);
   const [sessionApprovalIds, setSessionApprovalIds] = useState<Set<string>>(() => new Set());
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
+  const [pendingAssistantMessage, setPendingAssistantMessage] = useState<PendingAssistantMessage | null>(null);
   const autoApprovedApprovalIdsRef = useRef<Set<string>>(new Set());
   const pendingManualContinuationRef = useRef(false);
   const toolContinuationAttemptSignaturesRef = useRef<Set<string>>(new Set());
@@ -1184,12 +1185,12 @@ function Chat() {
   const mcpReadyCount = mcpServerValues.filter((server) => isMcpReady(server)).length;
   const alwaysAllowedToolCount = alwaysAllowedTools.size;
   const activityLabel = busy ? (isToolContinuation ? "Continuing tool" : "Streaming") : "Idle";
-  const approvalToolCallIds = useMemo(
-    () => indexActivePendingApprovals(messages, sessionApprovalIds),
-    [messages, sessionApprovalIds]
-  );
   const activeApprovalIds = sessionApprovalIds;
-  const visibleMessages = useMemo(() => compactVisibleMessages(messages), [messages]);
+  const approvalToolCallIds = useMemo(
+    () => indexActivePendingApprovals(messages, activeApprovalIds),
+    [messages, activeApprovalIds]
+  );
+  const visibleMessages = useMemo(() => compactVisibleMessages(messages, activeApprovalIds), [messages, activeApprovalIds]);
   const pendingApprovalCount = approvalToolCallIds.size;
   const approvalErrorMessage = formatChatErrorMessage(error);
   const retryIsSafe = !isProtocolRecoveryError(error);
@@ -1203,10 +1204,8 @@ function Chat() {
   const activeSubAgentCount = subAgents.filter((subAgent) => subAgent.status !== "archived").length;
   const subAgentBusy = subAgentAction !== null;
   const executionState = runtimeHealth?.cloudAgentInstance?.execution;
-  const showAssistantWorkingPlaceholder =
-    busy &&
-    pendingApprovalCount === 0 &&
-    (pendingUserMessage !== null || visibleMessages.at(-1)?.role === "user");
+  const showAssistantPlaceholder = pendingAssistantMessage !== null && pendingApprovalCount === 0;
+  const assistantPlaceholderText = busy ? "Working..." : "No assistant output was received.";
 
   useEffect(() => {
     const messageList = messageListRef.current;
@@ -1244,7 +1243,16 @@ function Chat() {
   }, [messages, pendingUserMessage]);
 
   useEffect(() => {
-    if (error) setPendingUserMessage(null);
+    if (!pendingAssistantMessage) return;
+    if (messagesContainRenderableAssistantAfter(messages, pendingAssistantMessage.startIndex, sessionApprovalIds)) {
+      setPendingAssistantMessage(null);
+    }
+  }, [messages, pendingAssistantMessage, sessionApprovalIds]);
+
+  useEffect(() => {
+    if (!error) return;
+    setPendingUserMessage(null);
+    setPendingAssistantMessage(null);
   }, [error]);
 
   useEffect(() => {
@@ -1341,6 +1349,9 @@ function Chat() {
       text,
       startIndex: messages.length
     });
+    setPendingAssistantMessage({
+      startIndex: messages.length
+    });
     stickToBottomRef.current = true;
     sendMessage({ text });
     if (input) input.value = "";
@@ -1353,6 +1364,7 @@ function Chat() {
       sessionTurnStartIndexRef.current = null;
       setSessionApprovalIds(new Set());
       setPendingUserMessage(null);
+      setPendingAssistantMessage(null);
       clearHistory();
     }
   }
@@ -1575,18 +1587,18 @@ function Chat() {
                 Use /goal to set an active objective, or ask for a plan, a Cloudflare operation, a memory lookup, or your browser timezone.
               </div>
             ) : (
-              visibleMessages.map((message) => (
+              visibleMessages.map(({ key, message }) => (
                 <Message
                   activeApprovalIds={activeApprovalIds}
                   approveToolAlways={approveToolAlways}
-                  key={message.id}
+                  key={key}
                   message={message}
                   respondToToolApproval={respondToToolApproval}
                 />
               ))
             )}
             {pendingUserMessage ? <PendingMessage role="user" text={pendingUserMessage.text} /> : null}
-            {showAssistantWorkingPlaceholder ? <PendingMessage role="assistant" text="Working..." /> : null}
+            {showAssistantPlaceholder ? <PendingMessage role="assistant" text={assistantPlaceholderText} /> : null}
             {approvalErrorMessage ? (
               <div className="error" role="alert">
                 <span>{approvalErrorMessage}</span>
@@ -1705,9 +1717,7 @@ function Message({
   message: UIMessage;
   respondToToolApproval: (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => boolean;
 }) {
-  const parts = compactMessageParts(message.parts).filter(({ part }) => {
-    return shouldRenderMessagePart(part, activeApprovalIds);
-  });
+  const parts = compactMessageParts(message.parts).filter(({ part }) => partHasVisibleContent(part, activeApprovalIds));
   if (parts.length === 0) return null;
 
   return (
@@ -2406,6 +2416,15 @@ type PendingUserMessage = {
   startIndex: number;
 };
 
+type PendingAssistantMessage = {
+  startIndex: number;
+};
+
+type VisibleMessage = {
+  key: string;
+  message: UIMessage;
+};
+
 type ToolContinuationCandidate = {
   signature: string;
   toolCallIds: Set<string>;
@@ -2448,6 +2467,25 @@ function messagesContainUserTextAfter(messages: UIMessage[], text: string, start
   return false;
 }
 
+function messagesContainRenderableAssistantAfter(
+  messages: UIMessage[],
+  startIndex: number,
+  activeApprovalIds: ReadonlySet<string>
+) {
+  for (let messageIndex = startIndex; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex];
+    if (!message || message.role !== "assistant") continue;
+    if (compactMessageParts(message.parts).some(({ part }) => partHasVisibleContent(part, activeApprovalIds))) return true;
+  }
+  return false;
+}
+
+function partHasVisibleContent(part: UIMessage["parts"][number], activeApprovalIds: ReadonlySet<string>) {
+  if (isTextUIPart(part)) return part.text.trim().length > 0;
+  if (isToolUIPart(part)) return shouldRenderMessagePart(part, activeApprovalIds);
+  return false;
+}
+
 function compactMessageParts(parts: UIMessage["parts"]) {
   const seenToolIds = new Set<string>();
   const visibleParts: Array<{ part: UIMessage["parts"][number]; index: number }> = [];
@@ -2482,22 +2520,40 @@ function latestRenderableAssistantTurn(messages: UIMessage[]) {
   return null;
 }
 
-function compactVisibleMessages(messages: UIMessage[]) {
-  const seenIds = new Set<string>();
-  const visible: UIMessage[] = [];
+function compactVisibleMessages(messages: UIMessage[], activeApprovalIds: ReadonlySet<string>) {
+  const seenSnapshots = new Set<string>();
+  const visible: VisibleMessage[] = [];
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (!message || !messageHasRenderableParts(message)) continue;
+    if (!message || !message.parts.some((part) => partHasVisibleContent(part, activeApprovalIds))) continue;
 
     const messageId = message.id || \`\${message.role}:\${index}\`;
-    if (seenIds.has(messageId)) continue;
+    const snapshotKey = \`\${messageId}:\${message.role}:\${messageVisibleSignature(message, activeApprovalIds)}\`;
+    if (seenSnapshots.has(snapshotKey)) continue;
 
-    seenIds.add(messageId);
-    visible.push(message);
+    seenSnapshots.add(snapshotKey);
+    visible.push({
+      key: \`\${messageId}:\${index}\`,
+      message
+    });
   }
 
   return visible.reverse();
+}
+
+function messageVisibleSignature(message: UIMessage, activeApprovalIds: ReadonlySet<string>) {
+  return compactMessageParts(message.parts)
+    .filter(({ part }) => partHasVisibleContent(part, activeApprovalIds))
+    .map(({ part, index }) => {
+      if (isTextUIPart(part)) return \`text:\${part.text}\`;
+      if (isToolUIPart(part)) {
+        const id = getToolCallId(part) ?? getToolApproval(part)?.id ?? String(index);
+        return \`tool:\${getToolName(part)}:\${id}:\${toolPartStateKey(part)}\`;
+      }
+      return String(index);
+    })
+    .join("|");
 }
 
 function isNearScrollBottom(element: HTMLElement) {
