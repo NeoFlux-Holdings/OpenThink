@@ -88,7 +88,8 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).not.toContain("sendAutomaticallyWhen");
     expect(client).not.toContain("approvalContinuationSignature");
     expect(client).toContain("pendingManualContinuationRef");
-    expect(client).toContain("toolContinuationSignature");
+    expect(client).toContain("toolContinuationCandidate");
+    expect(client).toContain("pendingToolContinuationMarkerMatches");
     expect(client).toContain("latestRenderableAssistantTurn");
     expect(client).toContain("hasUnsettledToolInput");
     expect(client).toContain('if (!connected) return;');

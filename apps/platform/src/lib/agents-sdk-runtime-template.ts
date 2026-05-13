@@ -1164,6 +1164,7 @@ function Chat() {
         toolCallId: toolCall.toolCallId,
         output: browserTimeContext()
       });
+      writePendingToolContinuationMarker({ toolCallId: toolCall.toolCallId });
       pendingManualContinuationRef.current = true;
     }
   });
@@ -1214,20 +1215,22 @@ function Chat() {
   useEffect(() => {
     if (!connected || pendingApprovalCount > 0 || hasUnsettledToolInput(messages)) return;
 
-    const recoveredContinuationSignature = pendingManualContinuationRef.current
-      ? ""
-      : toolContinuationSignature(messages);
-    if (!pendingManualContinuationRef.current && !recoveredContinuationSignature) return;
+    const recoveredContinuation = pendingManualContinuationRef.current
+      ? null
+      : toolContinuationCandidate(messages);
+    if (!pendingManualContinuationRef.current && !recoveredContinuation) return;
     if (
-      recoveredContinuationSignature &&
-      toolContinuationAttemptSignaturesRef.current.has(recoveredContinuationSignature)
+      recoveredContinuation &&
+      (!pendingToolContinuationMarkerMatches(recoveredContinuation, readPendingToolContinuationMarker()) ||
+        toolContinuationAttemptSignaturesRef.current.has(recoveredContinuation.signature))
     ) {
       return;
     }
 
     pendingManualContinuationRef.current = false;
-    if (recoveredContinuationSignature) {
-      toolContinuationAttemptSignaturesRef.current.add(recoveredContinuationSignature);
+    if (recoveredContinuation) {
+      toolContinuationAttemptSignaturesRef.current.add(recoveredContinuation.signature);
+      clearPendingToolContinuationMarker();
     }
     stickToBottomRef.current = true;
     void Promise.resolve(sendMessage()).catch((continuationError: unknown) => {
@@ -1258,6 +1261,7 @@ function Chat() {
         void Promise.resolve(addToolApprovalResponse({ id: approvalId, approved })).catch((approvalError: unknown) => {
           console.warn("[open-think] Failed to send tool approval.", approvalError);
         });
+        writePendingToolContinuationMarker({ approvalId, toolCallId });
         pendingManualContinuationRef.current = true;
       } catch (approvalError) {
         console.warn("[open-think] Failed to send tool approval.", approvalError);
@@ -1295,6 +1299,7 @@ function Chat() {
     const text = input?.value.trim();
     if (!text || !connected || busy) return;
     clearError();
+    clearPendingToolContinuationMarker();
     stickToBottomRef.current = true;
     sendMessage({ text });
     if (input) input.value = "";
@@ -1303,6 +1308,7 @@ function Chat() {
   function onClearHistory() {
     if (messages.length === 0) return;
     if (window.confirm("Clear this agent's persisted conversation history?")) {
+      clearPendingToolContinuationMarker();
       clearHistory();
     }
   }
@@ -2055,6 +2061,8 @@ function browserTimeContext() {
 }
 
 const alwaysAllowedToolsStorageKey = "open-think:always-allowed-tools";
+const pendingToolContinuationStorageKey = "open-think:pending-tool-continuation:" + clientConfig.deploymentId;
+const pendingToolContinuationMaxAgeMs = 5 * 60 * 1000;
 
 function toolApprovalPreferenceKey(toolName: string): string {
   return toolName.replace(/^tool_[a-z0-9]+_/i, "") || toolName;
@@ -2081,6 +2089,66 @@ function writeAlwaysAllowedTools(tools: Set<string>) {
   } catch {
     // Ignore storage failures so approvals still work in private or restricted browsers.
   }
+}
+
+function readPendingToolContinuationMarker(): ToolContinuationMarker | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const raw = window.sessionStorage.getItem(pendingToolContinuationStorageKey);
+    if (!raw) return null;
+
+    const marker = JSON.parse(raw) as Partial<ToolContinuationMarker>;
+    if (!Number.isFinite(marker.createdAt)) return null;
+    if (Date.now() - Number(marker.createdAt) > pendingToolContinuationMaxAgeMs) {
+      clearPendingToolContinuationMarker();
+      return null;
+    }
+
+    const toolCallId = typeof marker.toolCallId === "string" ? marker.toolCallId : undefined;
+    const approvalId = typeof marker.approvalId === "string" ? marker.approvalId : undefined;
+    if (!toolCallId && !approvalId) return null;
+
+    return {
+      createdAt: Number(marker.createdAt),
+      toolCallId,
+      approvalId
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writePendingToolContinuationMarker(marker: Omit<ToolContinuationMarker, "createdAt">) {
+  try {
+    window.sessionStorage.setItem(
+      pendingToolContinuationStorageKey,
+      JSON.stringify({
+        ...marker,
+        createdAt: Date.now()
+      })
+    );
+  } catch {
+    // The in-memory continuation path still handles the current approval click.
+  }
+}
+
+function clearPendingToolContinuationMarker() {
+  try {
+    window.sessionStorage.removeItem(pendingToolContinuationStorageKey);
+  } catch {
+    // Ignore storage failures so chat is never blocked by recovery bookkeeping.
+  }
+}
+
+function pendingToolContinuationMarkerMatches(
+  candidate: ToolContinuationCandidate,
+  marker: ToolContinuationMarker | null
+) {
+  if (!marker) return false;
+  if (marker.toolCallId && candidate.toolCallIds.has(marker.toolCallId)) return true;
+  if (marker.approvalId && candidate.approvalIds.has(marker.approvalId)) return true;
+  return false;
 }
 
 function readyStateLabel(value: number) {
@@ -2272,6 +2340,18 @@ type SubAgentMessage = {
   createdAt: string;
 };
 
+type ToolContinuationCandidate = {
+  signature: string;
+  toolCallIds: Set<string>;
+  approvalIds: Set<string>;
+};
+
+type ToolContinuationMarker = {
+  createdAt: number;
+  toolCallId?: string | undefined;
+  approvalId?: string | undefined;
+};
+
 function messageHasRenderableParts(message: UIMessage) {
   return message.parts.some((part) => isTextUIPart(part) || isToolUIPart(part));
 }
@@ -2349,11 +2429,13 @@ function hasUnsettledToolInput(messages: UIMessage[]) {
   });
 }
 
-function toolContinuationSignature(messages: UIMessage[]) {
+function toolContinuationCandidate(messages: UIMessage[]): ToolContinuationCandidate | null {
   const turn = latestRenderableAssistantTurn(messages);
-  if (!turn) return "";
+  if (!turn) return null;
 
   const settledToolKeys: string[] = [];
+  const toolCallIds = new Set<string>();
+  const approvalIds = new Set<string>();
   let lastToolPartIndex = -1;
 
   for (let partIndex = 0; partIndex < turn.message.parts.length; partIndex += 1) {
@@ -2361,25 +2443,32 @@ function toolContinuationSignature(messages: UIMessage[]) {
     if (!part || !isToolUIPart(part)) continue;
 
     const state = toolPartStateKey(part);
-    if (state === "input-streaming" || state === "input-available" || state === "waiting-approval") return "";
+    if (state === "input-streaming" || state === "input-available" || state === "waiting-approval") return null;
     if (!isSettledToolState(state)) continue;
 
     lastToolPartIndex = partIndex;
     const toolName = getToolName(part);
     const toolCallId = getToolCallId(part);
     const approval = getToolApproval(part);
-    settledToolKeys.push(toolName + ":" + (toolCallId ?? approval?.id ?? partIndex) + ":" + state);
+    const partId = toolCallId ?? approval?.id ?? String(partIndex);
+    if (toolCallId) toolCallIds.add(toolCallId);
+    if (approval?.id) approvalIds.add(approval.id);
+    settledToolKeys.push(toolName + ":" + partId + ":" + state);
   }
 
-  if (settledToolKeys.length === 0 || lastToolPartIndex < 0) return "";
+  if (settledToolKeys.length === 0 || lastToolPartIndex < 0) return null;
 
   const hasAssistantTextAfterLastTool = turn.message.parts.slice(lastToolPartIndex + 1).some((part) => {
     return isTextUIPart(part) && part.text.trim().length > 0;
   });
-  if (hasAssistantTextAfterLastTool) return "";
+  if (hasAssistantTextAfterLastTool) return null;
 
   const messageId = turn.message.id || "assistant:" + turn.messageIndex;
-  return messageId + ":" + settledToolKeys.join("|");
+  return {
+    signature: messageId + ":" + settledToolKeys.join("|"),
+    toolCallIds,
+    approvalIds
+  };
 }
 
 function isSettledToolState(state: string) {
