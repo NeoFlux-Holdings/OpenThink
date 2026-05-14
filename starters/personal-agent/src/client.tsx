@@ -181,6 +181,15 @@ function Chat() {
   }, [messages, pendingAssistantMessage, sessionApprovalIds]);
 
   useEffect(() => {
+    if (!emptyResponseMessage) return;
+    const latestUserMessage = latestUserTextMessageAfter(messages, 0);
+    if (!latestUserMessage) return;
+    if (messagesContainRenderableAssistantAfter(messages, latestUserMessage.index, sessionApprovalIds)) {
+      setEmptyResponseMessage(null);
+    }
+  }, [emptyResponseMessage, messages, sessionApprovalIds]);
+
+  useEffect(() => {
     if (!error) return;
     setPendingUserMessage(null);
     setPendingAssistantMessage(null);
