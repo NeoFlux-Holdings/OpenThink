@@ -3136,6 +3136,8 @@ import type { OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { routeAgentRequest, type AgentContext } from "agents";
 import {
   convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
   generateText,
   isTextUIPart,
   isToolUIPart,
@@ -3146,6 +3148,8 @@ import {
   type StreamTextTransform,
   type TextStreamPart,
   type ToolSet,
+  type UIMessageChunk,
+  type UIMessageStreamWriter,
   type UIMessage
 } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -3304,6 +3308,25 @@ function textPartContent(parts: UIMessage["parts"]) {
     .join("\\n\\n");
 }
 
+function isRenderableUiChunk(chunk: UIMessageChunk) {
+  if (chunk.type === "text-delta") return chunk.delta.trim().length > 0;
+  return (
+    chunk.type === "tool-input-available" ||
+    chunk.type === "tool-input-error" ||
+    chunk.type === "tool-approval-request" ||
+    chunk.type === "tool-output-available" ||
+    chunk.type === "tool-output-error" ||
+    chunk.type === "tool-output-denied"
+  );
+}
+
+function writeTextFallback(writer: UIMessageStreamWriter<UIMessage>, text: string) {
+  const id = "fallback-" + crypto.randomUUID();
+  writer.write({ type: "text-start", id });
+  writer.write({ type: "text-delta", id, delta: text });
+  writer.write({ type: "text-end", id });
+}
+
 function activeApprovalContinuationIndex(messages: UIMessage[]) {
   let lastMessageIndex = -1;
   let lastMessage: UIMessage | undefined;
@@ -3457,22 +3480,25 @@ export class PersonalChatAgent extends AIChatAgent<RuntimeEnv> {
 
     const env = this.runtimeEnv;
     const workersai = createWorkersAI({ binding: env.AI as never });
+    const model = workersai(env.OPEN_THINK_DEFAULT_MODEL ?? generatedDefaultModel);
+    const system = [
+      "You are " + (env.OPEN_THINK_AGENT_NAME ?? generatedAgentName) + ", an open-think personal agent running on Cloudflare Agents SDK.",
+      this.personalAgentSystemInstruction(),
+      "Use the native AIChatAgent chat protocol for resumable WebSocket streaming and SQLite message persistence.",
+      "If several user messages are queued without an assistant answer, treat them as one latest turn and answer the newest actionable request first.",
+      "Do not continue stale deployment or tool work unless the newest user message explicitly asks you to continue it.",
+      cloudAgentInstanceInstruction(env),
+      goalCommandInstruction(),
+      "You can create, brief, pause, resume, archive, summarize, and message Cloud Agent Instance sub-agents through built-in sub-agent tools when the owner asks for delegated work.",
+      "Use connected MCP tools when they are relevant. Current MCP tool approval policy: " + this.toolApprovalPolicy() + ".",
+      "Deployment id: " + (env.OPEN_THINK_DEPLOYMENT_ID ?? generatedDeploymentId),
+      "Cloudflare account id: " + ((env.OPEN_THINK_CF_ACCOUNT_ID ?? generatedCloudflareAccountId) || "not configured")
+    ].join("\\n");
+    const modelMessages = await prepareModelMessages(this.messages);
     const result = streamText({
-      model: workersai(env.OPEN_THINK_DEFAULT_MODEL ?? generatedDefaultModel),
-      system: [
-        "You are " + (env.OPEN_THINK_AGENT_NAME ?? generatedAgentName) + ", an open-think personal agent running on Cloudflare Agents SDK.",
-        this.personalAgentSystemInstruction(),
-        "Use the native AIChatAgent chat protocol for resumable WebSocket streaming and SQLite message persistence.",
-        "If several user messages are queued without an assistant answer, treat them as one latest turn and answer the newest actionable request first.",
-        "Do not continue stale deployment or tool work unless the newest user message explicitly asks you to continue it.",
-        cloudAgentInstanceInstruction(env),
-        goalCommandInstruction(),
-        "You can create, brief, pause, resume, archive, summarize, and message Cloud Agent Instance sub-agents through built-in sub-agent tools when the owner asks for delegated work.",
-        "Use connected MCP tools when they are relevant. Current MCP tool approval policy: " + this.toolApprovalPolicy() + ".",
-        "Deployment id: " + (env.OPEN_THINK_DEPLOYMENT_ID ?? generatedDeploymentId),
-        "Cloudflare account id: " + ((env.OPEN_THINK_CF_ACCOUNT_ID ?? generatedCloudflareAccountId) || "not configured")
-      ].join("\\n"),
-      messages: await prepareModelMessages(this.messages),
+      model,
+      system,
+      messages: modelMessages,
       tools: {
         ...this.mcpToolsWithApprovalPolicy(),
         ...this.builtinTools()
@@ -3483,7 +3509,39 @@ export class PersonalChatAgent extends AIChatAgent<RuntimeEnv> {
       onFinish
     });
 
-    return result.toUIMessageStreamResponse({ sendReasoning: false });
+    const stream = createUIMessageStream<UIMessage>({
+      execute: async ({ writer }) => {
+        const delayedFinishChunks: UIMessageChunk[] = [];
+        let sawRenderableChunk = false;
+        for await (const chunk of result.toUIMessageStream<UIMessage>({ sendReasoning: false })) {
+          if (chunk.type === "finish") {
+            delayedFinishChunks.push(chunk);
+            continue;
+          }
+          if (isRenderableUiChunk(chunk)) sawRenderableChunk = true;
+          writer.write(chunk);
+        }
+
+        if (!sawRenderableChunk && !options?.abortSignal?.aborted) {
+          const fallback = await generateText({
+            model,
+            system,
+            messages: modelMessages,
+            maxOutputTokens: 256,
+            temperature: 0.2,
+            ...(options?.abortSignal ? { abortSignal: options.abortSignal } : {})
+          });
+          writeTextFallback(
+            writer,
+            fallback.text.trim() || "I did not receive model output. Send the request again if needed."
+          );
+        }
+
+        for (const chunk of delayedFinishChunks) writer.write(chunk);
+      }
+    });
+
+    return createUIMessageStreamResponse({ stream });
   }
 
   private async ensureDefaultMcpServers(): Promise<void> {

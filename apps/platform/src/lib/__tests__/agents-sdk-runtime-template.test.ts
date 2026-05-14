@@ -209,6 +209,10 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(source).toContain("mergeAdjacentUserMessages");
     expect(source).toContain("mergeUserMessages");
     expect(source).toContain("newest actionable request first");
+    expect(source).toContain("isRenderableUiChunk");
+    expect(source).toContain("writeTextFallback");
+    expect(source).toContain("createUIMessageStream<UIMessage>");
+    expect(source).toContain("createUIMessageStreamResponse({ stream })");
     expect(source).toContain("stripEmptyTextParts");
     expect(source).toContain("isEmptyTextPart");
     expect(source).toContain("activeApprovalContinuationIndex");
@@ -218,7 +222,7 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(source).not.toContain("pruneMessages");
     expect(source).toContain("experimental_transform: suppressToolInputStreamingTransform()");
     expect(source).toContain("stopWhen: stepCountIs(5)");
-    expect(source).toContain("toUIMessageStreamResponse({ sendReasoning: false })");
+    expect(source).toContain("toUIMessageStream<UIMessage>({ sendReasoning: false })");
     expect(source).toContain('transport: "websocket"');
     expect(source).toContain("Personal agent subsystem:");
     expect(source).toContain("/personal-agent/setup");
