@@ -79,6 +79,7 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     const client = files.find((file) => file.path === "src/client.tsx")?.contents ?? "";
     expect(client).toContain('import { useAgent } from "agents/react"');
     expect(client).toContain("getToolApproval");
+    expect(client).toContain("getAgentMessages");
     expect(client).toContain('await import("streamdown")');
     expect(client).toContain("<Streamdown controls={false}>");
     expect(client).toContain("<MarkdownRenderer>{part.text}</MarkdownRenderer>");
@@ -111,6 +112,8 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("open={summary.defaultOpen ? true : undefined}");
     expect(client).toContain('summary.state !== "streaming"');
     expect(client).toContain("Details are available when this tool call settles.");
+    expect(client).toContain("agentMessagesUrl");
+    expect(client).toContain("setMessages(refreshedMessages)");
     expect(client).toContain("latestUserTextMessageAfter");
     expect(client).toContain("No assistant output was received. Retry the last message when ready.");
     expect(client).toContain("sendMessage({ text: retryTarget.text, messageId: retryTarget.id })");

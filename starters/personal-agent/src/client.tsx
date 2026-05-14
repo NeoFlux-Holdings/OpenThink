@@ -7,6 +7,7 @@ import {
   getToolInput,
   getToolOutput,
   getToolPartState,
+  getAgentMessages,
   useAgentChat
 } from "@cloudflare/ai-chat/react";
 import {
@@ -79,6 +80,7 @@ function Chat() {
   });
   const {
     messages,
+    setMessages,
     sendMessage,
     clearHistory,
     stop,
@@ -199,9 +201,31 @@ function Chat() {
     if (!pendingAssistantMessage || busy || !connected || error || pendingApprovalCount > 0) return;
     if (messagesContainRenderableAssistantAfter(messages, pendingAssistantMessage.startIndex, sessionApprovalIds)) return;
 
-    setPendingAssistantMessage(null);
-    setEmptyResponseMessage("No assistant output was received. Retry the last message when ready.");
-  }, [busy, connected, error, messages, pendingAssistantMessage, pendingApprovalCount, sessionApprovalIds]);
+    const startIndex = pendingAssistantMessage.startIndex;
+    const refreshTimer = window.setTimeout(() => {
+      void getAgentMessages<UIMessage>({
+        url: agentMessagesUrl(),
+        credentials: "include"
+      })
+        .then((refreshedMessages) => {
+          if (messagesContainRenderableAssistantAfter(refreshedMessages, startIndex, sessionApprovalIds)) {
+            setMessages(refreshedMessages);
+            setPendingAssistantMessage(null);
+            setEmptyResponseMessage(null);
+            return;
+          }
+
+          setPendingAssistantMessage(null);
+          setEmptyResponseMessage("No assistant output was received. Retry the last message when ready.");
+        })
+        .catch(() => {
+          setPendingAssistantMessage(null);
+          setEmptyResponseMessage("No assistant output was received. Retry the last message when ready.");
+        });
+    }, 800);
+
+    return () => window.clearTimeout(refreshTimer);
+  }, [busy, connected, error, messages, pendingAssistantMessage, pendingApprovalCount, sessionApprovalIds, setMessages]);
 
   useEffect(() => {
     if (!connected || pendingApprovalCount > 0 || hasUnsettledToolInput(messages)) return;
@@ -1897,6 +1921,14 @@ function formatExecutionPlane(plane?: RuntimeExecutionPlane) {
   if (plane.enabled || plane.configured) return plane.status ? titleCase(plane.status) : "Enabled";
   if (plane.default) return "Default pending";
   return "Not configured";
+}
+
+function agentMessagesUrl() {
+  const url = new URL(window.location.href);
+  url.pathname = "/agents/personal-chat-agent/default/get-messages";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function titleCase(value: string) {
