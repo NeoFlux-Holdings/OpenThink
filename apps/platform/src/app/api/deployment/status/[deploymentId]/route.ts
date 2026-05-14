@@ -13,6 +13,7 @@ export async function GET(
     const env = getPlatformRuntimeEnv();
     const repository = resolveDeploymentRepository(env.DB ? { DB: env.DB } : {}, env);
     const deployment = await repository.repository.get(deploymentId);
+    const events = await repository.repository.listEvents(deploymentId);
 
     if (!deployment) {
       return Response.json(
@@ -28,6 +29,7 @@ export async function GET(
       deploymentId,
       status: deployment.status,
       agentUrl: deployment.agentUrl,
+      events,
       resourcePlan: deployment.resourcePlan,
       automation: automationSnapshotForRequest(undefined, {
         repository: repository.kind,

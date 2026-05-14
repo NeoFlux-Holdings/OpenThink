@@ -15,17 +15,18 @@ The executor pattern to copy is not the package manager or framework choice. The
 Implemented integration:
 
 - Generated personal-agent runtimes expose a cloud agent instance profile that names Agents SDK as the chat/state runtime and executor as the default execution-plane contract.
-- Agents SDK deployments auto-register an `executor` MCP server when `OPEN_THINK_EXECUTOR_MCP_URL` is configured, with optional bearer auth from `OPEN_THINK_EXECUTOR_AUTH_TOKEN`. If the URL is missing, the profile reports executor as default-pending instead of pretending command or filesystem access is live.
-- Raw Worker fallback deployments expose the same profile and can discover or call executor MCP tools through `/mcp/tools?server=executor` and `/mcp/call`.
+- Agents SDK deployments include a first-party Cloudflare Sandbox/Containers executor bridge by default: the Worker exports `Sandbox`, binds it as a SQLite Durable Object, declares a `cloudflare/sandbox` container image, and sets `SANDBOX_TRANSPORT=rpc`.
+- Runtime executor tools are discoverable through `/mcp/tools?server=executor` and callable through `/mcp/call`. Chat also receives `sandbox_ping`, `sandbox_exec`, `sandbox_diff`, `sandbox_read_file`, `sandbox_write_file`, and `sandbox_list_files` tools with the normal approval policy.
+- `OPEN_THINK_EXECUTOR_MCP_URL` remains supported for a separate self-hosted or executor.sh-compatible MCP service, with optional bearer auth from `OPEN_THINK_EXECUTOR_AUTH_TOKEN`.
 - `/goal` prompts and persistence are executor-aware, so execution-heavy goal steps can route to executor without moving chat streaming or approval ownership out of Agents SDK.
 - Sub-agents are modeled as scoped child Cloud Agent Instances. Agents SDK remains the operator/chat runtime, while executor is the right place for sub-agent steps that need process execution, filesystem work, browser automation, OpenAPI execution, or long-running workers.
 
 Executor MCP target:
 
-- `OPEN_THINK_EXECUTOR_MCP_URL` points to an HTTP MCP endpoint, not directly to a raw container.
-- The OpenThink default target should be a same-account Sandbox bridge backed by Cloudflare Containers.
+- The default OpenThink target is the same deployed Worker and its Sandbox Durable Object binding.
+- `OPEN_THINK_EXECUTOR_MCP_URL` points to an HTTP MCP endpoint only when you intentionally want a separate execution service, not directly to a raw container.
 - It can also point to a self-hosted [`RhysSullivan/executor`](https://github.com/RhysSullivan/executor) deployment or hosted Executor endpoint.
-- Sandbox/Containers are the first-party backing plane for code execution, file operations, previews, subprocesses, and long-running jobs. Executor is the MCP/governance layer that exposes those capabilities to the agent.
+- Sandbox/Containers are the first-party backing plane for code execution, file operations, diff capture, previews, subprocesses, and long-running jobs. Executor is the MCP/governance layer that exposes those capabilities to the agent.
 
 Good places to incorporate [`RhysSullivan/executor`](https://github.com/RhysSullivan/executor):
 

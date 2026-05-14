@@ -164,9 +164,11 @@ export interface DeploymentRepository {
   updateStatus(
     deploymentId: string,
     status: DeploymentStatus,
-    resourcePlan?: Record<string, unknown>
+    resourcePlan?: Record<string, unknown>,
+    agentUrl?: string
   ): Promise<void>;
   appendEvent(deploymentId: string, event: DeploymentEvent): Promise<void>;
+  listEvents(deploymentId: string): Promise<DeploymentEvent[]>;
   get(deploymentId: string): Promise<DeploymentRecord | null>;
   list(limit?: number): Promise<DeploymentRecord[]>;
 }
@@ -254,15 +256,29 @@ export class D1DeploymentRepository implements DeploymentRepository {
   async updateStatus(
     deploymentId: string,
     status: DeploymentStatus,
-    resourcePlan: Record<string, unknown> = {}
+    resourcePlan: Record<string, unknown> = {},
+    agentUrl?: string
   ): Promise<void> {
+    const now = new Date().toISOString();
+    if (agentUrl) {
+      await this.db
+        .prepare(
+          `update deployments
+          set status = ?, agent_url = ?, resource_plan_json = ?, updated_at = ?
+          where id = ?`
+        )
+        .bind(status, agentUrl, JSON.stringify(resourcePlan), now, deploymentId)
+        .run();
+      return;
+    }
+
     await this.db
       .prepare(
         `update deployments
         set status = ?, resource_plan_json = ?, updated_at = ?
         where id = ?`
       )
-      .bind(status, JSON.stringify(resourcePlan), new Date().toISOString(), deploymentId)
+      .bind(status, JSON.stringify(resourcePlan), now, deploymentId)
       .run();
   }
 
@@ -271,7 +287,14 @@ export class D1DeploymentRepository implements DeploymentRepository {
       .prepare(
         `insert into deployment_events (
           id, deployment_id, stage, status, progress, label, detail, created_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?)`
+        ) values (?, ?, ?, ?, ?, ?, ?, ?)
+        on conflict(id) do update set
+          stage = excluded.stage,
+          status = excluded.status,
+          progress = excluded.progress,
+          label = excluded.label,
+          detail = excluded.detail,
+          created_at = excluded.created_at`
       )
       .bind(
         `${deploymentId}:${event.id}`,
@@ -284,6 +307,28 @@ export class D1DeploymentRepository implements DeploymentRepository {
         event.timestamp
       )
       .run();
+  }
+
+  async listEvents(deploymentId: string): Promise<DeploymentEvent[]> {
+    const rows = await this.db
+      .prepare(
+        `select id, stage, status, progress, label, detail, created_at as timestamp
+        from deployment_events
+        where deployment_id = ?
+        order by created_at asc`
+      )
+      .bind(deploymentId)
+      .all<DeploymentEventRow>();
+
+    return rows.results.map((row) => ({
+      id: row.id.includes(":") ? row.id.split(":").slice(1).join(":") : row.id,
+      stage: row.stage,
+      status: row.status,
+      progress: row.progress,
+      label: row.label,
+      detail: row.detail,
+      timestamp: row.timestamp
+    }));
   }
 
   async get(deploymentId: string): Promise<DeploymentRecord | null> {
@@ -397,13 +442,15 @@ export class InMemoryDeploymentRepository implements DeploymentRepository {
   async updateStatus(
     deploymentId: string,
     status: DeploymentStatus,
-    resourcePlan: Record<string, unknown> = {}
+    resourcePlan: Record<string, unknown> = {},
+    agentUrl?: string
   ): Promise<void> {
     const existing = this.records.get(deploymentId);
     if (!existing) return;
     this.records.set(deploymentId, {
       ...existing,
       status,
+      agentUrl: agentUrl ?? existing.agentUrl,
       resourcePlan,
       updatedAt: new Date().toISOString()
     });
@@ -411,8 +458,17 @@ export class InMemoryDeploymentRepository implements DeploymentRepository {
 
   async appendEvent(deploymentId: string, event: DeploymentEvent): Promise<void> {
     const events = this.events.get(deploymentId) ?? [];
-    events.push(event);
+    const existingIndex = events.findIndex((item) => item.id === event.id);
+    if (existingIndex >= 0) {
+      events[existingIndex] = event;
+    } else {
+      events.push(event);
+    }
     this.events.set(deploymentId, events);
+  }
+
+  async listEvents(deploymentId: string): Promise<DeploymentEvent[]> {
+    return [...(this.events.get(deploymentId) ?? [])];
   }
 
   async get(deploymentId: string): Promise<DeploymentRecord | null> {
@@ -442,6 +498,16 @@ interface DeploymentRecordRow {
   termsAcceptedAt?: string | null;
   tenantKind?: "self" | "partner" | null;
   agentName?: string | null;
+}
+
+interface DeploymentEventRow {
+  id: string;
+  stage: string;
+  status: DeploymentEvent["status"];
+  progress: number;
+  label: string;
+  detail: string;
+  timestamp: string;
 }
 
 function parseResourcePlan(value: string): Record<string, unknown> {

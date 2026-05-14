@@ -11,7 +11,14 @@
     "deploy": "vite build --outDir dist/client --emptyOutDir && wrangler deploy --config wrangler.agents-sdk.jsonc"
   },
   "dependencies": {
-    "@ai-sdk/react": "^3.0.0",
+    "@ai-sdk/react": "^3.0.184",
+    "@cloudflare/ai-chat": "^0.7.0",
+    "@cloudflare/codemode": "0.3.6",
+    "@cloudflare/sandbox": "0.10.1",
+    "@cloudflare/shell": "0.3.7",
+    "@cloudflare/think": "0.6.1",
+    "@cloudflare/voice": "0.2.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@open-think/core": "workspace:*",
     "@open-think/llm": "workspace:*",
     "@open-think/mcp": "workspace:*",
@@ -19,14 +26,14 @@
     "@open-think/storage": "workspace:*",
     "@open-think/tasks": "workspace:*",
     "@open-think/terminal": "workspace:*",
-    "@cloudflare/ai-chat": "^0.6.2",
-    "agents": "^0.12.3",
-    "ai": "^6.0.174",
+    "@pierre/diffs": "1.1.22",
+    "agents": "^0.12.4",
+    "ai": "^6.0.182",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "streamdown": "^2.5.0",
-    "zod": "^4.4.2",
-    "workers-ai-provider": "^3.1.13"
+    "workers-ai-provider": "^3.1.14",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/react": "latest",

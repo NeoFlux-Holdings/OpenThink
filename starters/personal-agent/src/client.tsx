@@ -7,7 +7,6 @@ import {
   getToolInput,
   getToolOutput,
   getToolPartState,
-  getAgentMessages,
   useAgentChat
 } from "@cloudflare/ai-chat/react";
 import {
@@ -27,6 +26,28 @@ const MarkdownRenderer = lazy(async () => {
   };
 });
 
+const PatchDiffRenderer = lazy(async () => {
+  const { PatchDiff } = await import("@pierre/diffs/react");
+  return {
+    default: function PatchDiffRenderer({ patch }: { patch: string }) {
+      return (
+        <PatchDiff
+          disableWorkerPool
+          options={{
+            diffIndicators: "bars",
+            diffStyle: "unified",
+            lineDiffType: "word",
+            overflow: "wrap",
+            theme: "pierre-light",
+            themeType: "light"
+          }}
+          patch={patch}
+        />
+      );
+    }
+  };
+});
+
 const clientConfig = {
   agentName: "Personal Agent",
   deploymentId: "local",
@@ -35,6 +56,33 @@ const clientConfig = {
   sdkPackage: "@open-think/core",
   sdkFactory: "createHostedCloudAgentClient"
 } as const;
+
+const runModes = [
+  { id: "auto", label: "Auto" },
+  { id: "plan-first", label: "Plan first" },
+  { id: "train", label: "Train" }
+] as const;
+
+type RunMode = (typeof runModes)[number]["id"];
+
+type SocketDiagnostic = {
+  state: "closed" | "error" | "reconnecting";
+  detail: string;
+  at: string;
+};
+
+type TrainStep = {
+  id: string;
+  text: string;
+  approved: boolean;
+};
+
+type TrainPlanState = {
+  objective: string;
+  steps: TrainStep[];
+  draftVisible: boolean;
+  granular: boolean;
+};
 
 function App() {
   return (
@@ -45,8 +93,15 @@ function App() {
 }
 
 function Chat() {
+  const [runMode, setRunMode] = useState<RunMode>("auto");
+  const [trainPlan, setTrainPlan] = useState<TrainPlanState>(() => defaultTrainPlanState());
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const [mcpServers, setMcpServers] = useState<Record<string, McpServerState>>({});
   const [runtimeHealth, setRuntimeHealth] = useState<RuntimeHealth | null>(null);
+  const [browserDiagnostics, setBrowserDiagnostics] = useState<BrowserDiagnosticsResponse | null>(null);
+  const [browserDiagnosticsBusy, setBrowserDiagnosticsBusy] = useState(false);
+  const [capabilitySummary, setCapabilitySummary] = useState<CapabilitySummary | null>(null);
   const [alwaysAllowedTools, setAlwaysAllowedTools] = useState<Set<string>>(() => readAlwaysAllowedTools());
   const [subAgents, setSubAgents] = useState<SubAgent[]>([]);
   const [selectedSubAgentId, setSelectedSubAgentId] = useState("");
@@ -54,17 +109,21 @@ function Chat() {
   const [subAgentAction, setSubAgentAction] = useState<SubAgentAction | null>(null);
   const [subAgentError, setSubAgentError] = useState<string | null>(null);
   const [subAgentDraft, setSubAgentDraft] = useState<SubAgentDraft>(defaultSubAgentDraft);
+  const [learningActionId, setLearningActionId] = useState<string | null>(null);
   const [sdkCopied, setSdkCopied] = useState(false);
   const [sessionApprovalIds, setSessionApprovalIds] = useState<Set<string>>(() => new Set());
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
   const [pendingAssistantMessage, setPendingAssistantMessage] = useState<PendingAssistantMessage | null>(null);
   const [emptyResponseMessage, setEmptyResponseMessage] = useState<string | null>(null);
+  const [socketGeneration, setSocketGeneration] = useState(0);
+  const [socketDiagnostic, setSocketDiagnostic] = useState<SocketDiagnostic | null>(null);
   const autoApprovedApprovalIdsRef = useRef<Set<string>>(new Set());
-  const pendingManualContinuationRef = useRef(false);
   const toolContinuationAttemptSignaturesRef = useRef<Set<string>>(new Set());
   const sessionTurnStartIndexRef = useRef<number | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const stickToBottomRef = useRef(true);
+  const socketRecoveryAttemptsRef = useRef(0);
 
   const handleMcpUpdate = useCallback((servers: unknown) => {
     setMcpServers((previous) => {
@@ -76,7 +135,26 @@ function Chat() {
   const agent = useAgent({
     agent: "PersonalChatAgent",
     name: "default",
-    onMcpUpdate: handleMcpUpdate
+    query: { ot_socket: String(socketGeneration) },
+    onMcpUpdate: handleMcpUpdate,
+    onOpen: () => {
+      socketRecoveryAttemptsRef.current = 0;
+      setSocketDiagnostic(null);
+    },
+    onClose: (event) => {
+      setSocketDiagnostic({
+        at: new Date().toISOString(),
+        detail: formatSocketClose(event),
+        state: "closed"
+      });
+    },
+    onError: () => {
+      setSocketDiagnostic({
+        at: new Date().toISOString(),
+        detail: "WebSocket error while connecting to the agent.",
+        state: "error"
+      });
+    }
   });
   const {
     messages,
@@ -94,8 +172,10 @@ function Chat() {
     isToolContinuation
   } = useAgentChat({
     agent,
-    autoContinueAfterToolResult: false,
-    resume: false,
+    autoContinueAfterToolResult: true,
+    resume: true,
+    cancelOnClientAbort: false,
+    getInitialMessages: getInitialAgentMessages,
     onToolCall: async ({ toolCall, addToolOutput }) => {
       if (toolCall.toolName !== "getUserTimezone") return;
 
@@ -103,8 +183,6 @@ function Chat() {
         toolCallId: toolCall.toolCallId,
         output: browserTimeContext()
       });
-      writePendingToolContinuationMarker({ toolCallId: toolCall.toolCallId });
-      pendingManualContinuationRef.current = true;
     }
   });
 
@@ -134,10 +212,27 @@ function Chat() {
     messages.some((message) => message.role === "user");
   const selectedSubAgent = subAgents.find((subAgent) => subAgent.id === selectedSubAgentId) ?? subAgents[0] ?? null;
   const activeSubAgentCount = subAgents.filter((subAgent) => subAgent.status !== "archived").length;
+  const searchResults = useMemo(
+    () => searchPaletteResults(searchQuery, messages, activeApprovalIds, capabilitySummary, subAgents),
+    [activeApprovalIds, capabilitySummary, messages, searchQuery, subAgents]
+  );
   const subAgentBusy = subAgentAction !== null;
   const executionState = runtimeHealth?.cloudAgentInstance?.execution;
+  const codeModeState = runtimeHealth?.cloudAgentInstance?.codeMode;
+  const workspaceState = runtimeHealth?.cloudAgentInstance?.workspace;
   const showAssistantPlaceholder = pendingAssistantMessage !== null && pendingApprovalCount === 0;
   const assistantPlaceholderText = busy ? "Working..." : "No assistant output was received.";
+
+  const forceReconnect = useCallback(() => {
+    socketRecoveryAttemptsRef.current = 0;
+    setSocketDiagnostic({
+      at: new Date().toISOString(),
+      detail: "Opening a fresh agent socket.",
+      state: "reconnecting"
+    });
+    setSocketGeneration((generation) => generation + 1);
+    agent.reconnect();
+  }, [agent]);
 
   useEffect(() => {
     const messageList = messageListRef.current;
@@ -146,8 +241,28 @@ function Chat() {
   }, [messages, status, isStreaming, isServerStreaming]);
 
   useEffect(() => {
+    if (agent.readyState !== WebSocket.CLOSING) return;
+    if (socketRecoveryAttemptsRef.current >= 3) return;
+
+    const timeout = window.setTimeout(() => {
+      if (agent.readyState !== WebSocket.CLOSING) return;
+      socketRecoveryAttemptsRef.current += 1;
+      setSocketDiagnostic({
+        at: new Date().toISOString(),
+        detail: "Agent socket was stuck closing; opening a fresh socket.",
+        state: "reconnecting"
+      });
+      setSocketGeneration((generation) => generation + 1);
+    }, 3000);
+
+    return () => window.clearTimeout(timeout);
+  }, [agent.readyState, socketGeneration]);
+
+  useEffect(() => {
     void loadSubAgents();
     void loadRuntimeHealth();
+    void loadBrowserDiagnostics();
+    void loadCapabilitySummary();
   }, []);
 
   useEffect(() => {
@@ -198,15 +313,27 @@ function Chat() {
   }, [error]);
 
   useEffect(() => {
+    function onWindowKeyDown(event: globalThis.KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+      if (event.key === "Escape") {
+        setSearchOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, []);
+
+  useEffect(() => {
     if (!pendingAssistantMessage || busy || !connected || error || pendingApprovalCount > 0) return;
     if (messagesContainRenderableAssistantAfter(messages, pendingAssistantMessage.startIndex, sessionApprovalIds)) return;
 
     const startIndex = pendingAssistantMessage.startIndex;
     const refreshTimer = window.setTimeout(() => {
-      void getAgentMessages<UIMessage>({
-        url: agentMessagesUrl(),
-        credentials: "include"
-      })
+      void getAgentMessages()
         .then((refreshedMessages) => {
           if (messagesContainRenderableAssistantAfter(refreshedMessages, startIndex, sessionApprovalIds)) {
             setMessages(refreshedMessages);
@@ -228,30 +355,14 @@ function Chat() {
   }, [busy, connected, error, messages, pendingAssistantMessage, pendingApprovalCount, sessionApprovalIds, setMessages]);
 
   useEffect(() => {
-    if (!connected || pendingApprovalCount > 0 || hasUnsettledToolInput(messages)) return;
-
-    const recoveredContinuation = pendingManualContinuationRef.current
-      ? null
-      : toolContinuationCandidate(messages);
-    if (!pendingManualContinuationRef.current && !recoveredContinuation) return;
-    if (
-      recoveredContinuation &&
-      (!pendingToolContinuationMarkerMatches(recoveredContinuation, readPendingToolContinuationMarker()) ||
-        toolContinuationAttemptSignaturesRef.current.has(recoveredContinuation.signature))
-    ) {
-      return;
-    }
-
-    pendingManualContinuationRef.current = false;
-    if (recoveredContinuation) {
-      toolContinuationAttemptSignaturesRef.current.add(recoveredContinuation.signature);
-      clearPendingToolContinuationMarker();
-    }
-    stickToBottomRef.current = true;
-    void Promise.resolve(sendMessage()).catch((continuationError: unknown) => {
-      console.error("[useAgentChat] Manual tool continuation failed", continuationError);
-    });
-  }, [connected, messages, pendingApprovalCount, sendMessage]);
+    if (!connected) return;
+    const recoveredContinuation = toolContinuationCandidate(messages);
+    if (!recoveredContinuation) return;
+    if (!pendingToolContinuationMarkerMatches(recoveredContinuation, readPendingToolContinuationMarker())) return;
+    if (toolContinuationAttemptSignaturesRef.current.has(recoveredContinuation.signature)) return;
+    toolContinuationAttemptSignaturesRef.current.add(recoveredContinuation.signature);
+    clearPendingToolContinuationMarker();
+  }, [connected, messages]);
 
   function onMessageListScroll() {
     const messageList = messageListRef.current;
@@ -276,8 +387,6 @@ function Chat() {
         void Promise.resolve(addToolApprovalResponse({ id: approvalId, approved })).catch((approvalError: unknown) => {
           console.warn("[open-think] Failed to send tool approval.", approvalError);
         });
-        writePendingToolContinuationMarker({ approvalId, toolCallId });
-        pendingManualContinuationRef.current = true;
       } catch (approvalError) {
         console.warn("[open-think] Failed to send tool approval.", approvalError);
         return false;
@@ -313,21 +422,38 @@ function Chat() {
     const input = event.currentTarget.elements.namedItem("message") as HTMLTextAreaElement | null;
     const text = input?.value.trim();
     if (!text || !connected || busy) return;
+    const trainSubmission = runMode === "train" ? buildTrainModeSubmission(text, trainPlan) : null;
+    if (trainSubmission && !trainSubmission.ready) {
+      setTrainPlan(draftTrainPlan(trainSubmission.objective || text, trainPlan));
+      composerInputRef.current?.focus();
+      return;
+    }
+    const outboundText = trainSubmission?.text ?? applyRunModeToMessage(text, runMode);
     clearError();
     setEmptyResponseMessage(null);
     clearPendingToolContinuationMarker();
     sessionTurnStartIndexRef.current = messages.length;
     setSessionApprovalIds(new Set());
     setPendingUserMessage({
-      text,
+      text: outboundText,
       startIndex: messages.length
     });
     setPendingAssistantMessage({
       startIndex: messages.length
     });
     stickToBottomRef.current = true;
-    sendMessage({ text });
+    sendMessage({ text: outboundText });
     if (input) input.value = "";
+    if (runMode === "train") setTrainPlan(defaultTrainPlanState());
+  }
+
+  function draftTrainPlanFromComposer() {
+    const objective = composerInputRef.current?.value.trim() || trainPlan.objective;
+    if (!objective.trim()) {
+      composerInputRef.current?.focus();
+      return;
+    }
+    setTrainPlan(draftTrainPlan(objective, trainPlan));
   }
 
   function onClearHistory() {
@@ -414,6 +540,74 @@ function Chat() {
     } catch {
       setRuntimeHealth(null);
     }
+  }
+
+  async function loadBrowserDiagnostics() {
+    try {
+      const data = await fetchBrowserDiagnostics();
+      setBrowserDiagnostics(data);
+    } catch (loadError) {
+      setBrowserDiagnostics({
+        ok: false,
+        status: "unavailable",
+        mode: "read-only",
+        summary: loadError instanceof Error ? loadError.message : "Could not load Browser Run diagnostics.",
+        stages: []
+      });
+    }
+  }
+
+  async function runBrowserDiagnostics() {
+    setBrowserDiagnosticsBusy(true);
+    try {
+      const data = await fetchBrowserDiagnostics({
+        method: "POST",
+        body: JSON.stringify({ live: true })
+      });
+      setBrowserDiagnostics(data);
+    } catch (runError) {
+      setBrowserDiagnostics({
+        ok: false,
+        status: "live-check-failed",
+        mode: "live",
+        summary: runError instanceof Error ? runError.message : "Browser Run live check failed.",
+        stages: []
+      });
+    } finally {
+      setBrowserDiagnosticsBusy(false);
+    }
+  }
+
+  async function loadCapabilitySummary() {
+    const [skills, learning, artifacts, contributions, executor, mcp, mcpObservability] = await Promise.all([
+      optionalJsonFetch<SkillListResponse>("/skills"),
+      optionalJsonFetch<LearningResponse>("/learning"),
+      optionalJsonFetch<ArtifactListResponse>("/artifacts"),
+      optionalJsonFetch<ContributionStatusResponse>("/contributions"),
+      optionalJsonFetch<ExecutorResponse>("/executor"),
+      optionalJsonFetch<McpServerCatalogResponse>("/mcp/servers"),
+      optionalJsonFetch<McpObservabilityResponse>("/mcp/observability")
+    ]);
+    setCapabilitySummary({ skills, learning, artifacts, contributions, executor, mcp, mcpObservability });
+  }
+
+  async function curateLearningSuggestion(id: string, status: LearningSuggestionStatus, summary?: string) {
+    setLearningActionId(id);
+    try {
+      await jsonFetch("/learning/" + encodeURIComponent(id), {
+        method: "PATCH",
+        body: JSON.stringify(summary === undefined ? { status } : { status, summary })
+      });
+      await loadCapabilitySummary();
+    } finally {
+      setLearningActionId(null);
+    }
+  }
+
+  async function editLearningSuggestion(suggestion: LearningSuggestion) {
+    const nextSummary = window.prompt("Edit learning suggestion", suggestion.summary);
+    if (nextSummary === null) return;
+    await curateLearningSuggestion(suggestion.id, "pending", nextSummary);
   }
 
   async function loadSubAgentMessages(id: string) {
@@ -561,23 +755,31 @@ function Chat() {
       </header>
 
       <section className="workspace" aria-label="Personal agent workspace">
+        <PersonaSidebar
+          activeSubAgentCount={activeSubAgentCount}
+          focusComposer={() => composerInputRef.current?.focus()}
+          openSearch={() => setSearchOpen(true)}
+          pendingApprovalCount={pendingApprovalCount}
+          summary={capabilitySummary}
+        />
+
         <section className="chat-panel" aria-busy={busy} aria-label="Chat">
           <div className="panel-header">
             <h1>Conversation</h1>
             <p>Streaming, message persistence, client tools, and approvals are handled by Cloudflare Agents SDK.</p>
           </div>
 
-          <div className="message-list" aria-live="polite" onScroll={onMessageListScroll} ref={messageListRef} role="log">
+          <div className="message-list" aria-live="polite" id="chat-feed" onScroll={onMessageListScroll} ref={messageListRef} role="log">
             {visibleMessages.length === 0 ? (
               <div className="empty-state">
                 Use /goal to set an active objective, or ask for a plan, a Cloudflare operation, a memory lookup, or your browser timezone.
               </div>
             ) : (
-              visibleMessages.map(({ key, message }) => (
+              visibleMessages.map(({ key, message }, index) => (
                 <Message
                   activeApprovalIds={activeApprovalIds}
                   approveToolAlways={approveToolAlways}
-                  key={key}
+                  key={key + ":" + String(index)}
                   message={message}
                   respondToToolApproval={respondToToolApproval}
                 />
@@ -615,6 +817,37 @@ function Chat() {
           </div>
 
           <form className="composer" onSubmit={onSubmit}>
+            <div className="composer-mode" aria-label="Run mode" role="radiogroup">
+              {runModes.map((mode) => (
+                <button
+                  aria-checked={runMode === mode.id}
+                  className="mode-chip"
+                  data-active={runMode === mode.id ? "true" : "false"}
+                  key={mode.id}
+                  onClick={() => setRunMode(mode.id)}
+                  role="radio"
+                  type="button"
+                >
+                  {mode.label}
+                </button>
+              ))}
+            </div>
+            {runMode === "train" ? (
+              <TrainPlanPanel
+                connected={connected}
+                onAddStep={() => setTrainPlan((current) => addTrainStep(current))}
+                onApproveAll={() => setTrainPlan((current) => approveAllTrainSteps(current))}
+                onClear={() => setTrainPlan(defaultTrainPlanState())}
+                onDraft={draftTrainPlanFromComposer}
+                onGranularChange={(granular) => setTrainPlan((current) => ({ ...current, granular }))}
+                onMoveStep={(id, direction) => setTrainPlan((current) => moveTrainStep(current, id, direction))}
+                onObjectiveChange={(objective) => setTrainPlan((current) => ({ ...current, objective, draftVisible: true }))}
+                onRemoveStep={(id) => setTrainPlan((current) => removeTrainStep(current, id))}
+                onStepApprovalChange={(id, approved) => setTrainPlan((current) => updateTrainStep(current, id, { approved }))}
+                onStepTextChange={(id, text) => setTrainPlan((current) => updateTrainStep(current, id, { text }))}
+                plan={trainPlan}
+              />
+            ) : null}
             <textarea
               aria-label="Message"
               autoComplete="off"
@@ -622,6 +855,7 @@ function Chat() {
               name="message"
               onKeyDown={onComposerKeyDown}
               placeholder={connected ? "Ask, or start with /goal to set an active objective..." : "Reconnect to continue..."}
+              ref={composerInputRef}
               rows={1}
             />
             <button className="button button-primary" disabled={!connected || busy} type="submit">
@@ -630,16 +864,19 @@ function Chat() {
           </form>
         </section>
 
-        <aside className="side-panel" aria-label="Runtime details">
+        <aside className="side-panel" aria-label="Artifact canvas and runtime details">
           <div className="panel-header">
-            <h2>Runtime</h2>
-            <p>Native SDK chat channel for this deployed agent.</p>
+            <h2>Canvas</h2>
+            <p>Artifacts, workspace state, and runtime controls for this deployed agent.</p>
           </div>
-          <div className="side-body">
+          <div className="side-body" id="runtime">
+            <ArtifactStage summary={capabilitySummary} />
             <Metric label="Transport" value="useAgent WebSocket" />
             <Metric label="Chat lifecycle" value="useAgentChat" />
+            <Metric label="Socket detail" value={socketDiagnostic?.detail ?? connectionState} />
             <Metric label="Model" value={clientConfig.defaultModel} />
             <Metric label="MCP policy" value={formatToolApprovalPolicy(clientConfig.toolApprovalPolicy)} />
+            <Metric label="Code Mode" value={formatCodeMode(codeModeState)} />
             <Metric label="History" value="SQLite persisted" />
             <Metric label="MCP servers" value={formatMcpStatus(mcpReadyCount, mcpServerValues.length)} />
             <Metric label="Approvals" value={pendingApprovalCount ? `${pendingApprovalCount} pending` : "None pending"} />
@@ -647,7 +884,14 @@ function Chat() {
             <Metric label="Executor MCP" value={formatExecutionPlane(executionState?.executor)} />
             <Metric label="Sandbox" value={formatExecutionPlane(executionState?.sandbox)} />
             <Metric label="Containers" value={formatExecutionPlane(executionState?.containers)} />
+            <BrowserRunDiagnosticsPanel
+              diagnostics={browserDiagnostics}
+              loading={browserDiagnosticsBusy}
+              onRefresh={loadBrowserDiagnostics}
+              onRun={runBrowserDiagnostics}
+            />
             <Metric label="Slash commands" value="/goal enabled" />
+            <Metric label="Workspace" value={formatWorkspaceState(workspaceState)} />
             <Metric label="Sub-agents" value={subAgents.length ? `${activeSubAgentCount}/${subAgents.length} active` : "None"} />
             <div className="button-row">
               {busy ? (
@@ -657,8 +901,8 @@ function Chat() {
               ) : null}
               <button
                 className="button"
-                disabled={connected || agent.readyState === WebSocket.CONNECTING}
-                onClick={() => agent.reconnect()}
+                disabled={connected}
+                onClick={forceReconnect}
                 type="button"
               >
                 Reconnect
@@ -673,6 +917,13 @@ function Chat() {
               Clear history
             </button>
             <HostedAgentPanel copied={sdkCopied} onCopy={copySdkSnippet} />
+            <CapabilityCanvas
+              learningActionId={learningActionId}
+              onCurateLearning={curateLearningSuggestion}
+              onEditLearning={editLearningSuggestion}
+              onRefresh={loadCapabilitySummary}
+              summary={capabilitySummary}
+            />
             <SubAgentConsole
               briefSubAgentInMainChat={briefSubAgentInMainChat}
               connected={connected}
@@ -695,7 +946,150 @@ function Chat() {
           </div>
         </aside>
       </section>
+
+      <CommandPalette
+        onClose={() => setSearchOpen(false)}
+        onQueryChange={setSearchQuery}
+        open={searchOpen}
+        query={searchQuery}
+        results={searchResults}
+      />
     </>
+  );
+}
+
+function TrainPlanPanel({
+  connected,
+  onAddStep,
+  onApproveAll,
+  onClear,
+  onDraft,
+  onGranularChange,
+  onMoveStep,
+  onObjectiveChange,
+  onRemoveStep,
+  onStepApprovalChange,
+  onStepTextChange,
+  plan
+}: {
+  connected: boolean;
+  onAddStep: () => void;
+  onApproveAll: () => void;
+  onClear: () => void;
+  onDraft: () => void;
+  onGranularChange: (granular: boolean) => void;
+  onMoveStep: (id: string, direction: -1 | 1) => void;
+  onObjectiveChange: (objective: string) => void;
+  onRemoveStep: (id: string) => void;
+  onStepApprovalChange: (id: string, approved: boolean) => void;
+  onStepTextChange: (id: string, text: string) => void;
+  plan: TrainPlanState;
+}) {
+  const approvedCount = plan.steps.filter((step) => step.approved).length;
+  const ready = trainPlanReadyToRun(plan);
+
+  return (
+    <section className="train-panel" aria-label="Editable train plan" data-ready={ready ? "true" : "false"}>
+      <div className="train-panel-heading">
+        <div>
+          <strong>Train plan</strong>
+          <p>
+            Draft, edit, and approve a repeatable plan before the agent acts. Send runs only after the plan is approved.
+          </p>
+        </div>
+        <div className="button-row">
+          <button className="button button-compact" disabled={!connected} onClick={onDraft} type="button">
+            Draft plan
+          </button>
+          {plan.draftVisible ? (
+            <button className="button button-compact" onClick={onClear} type="button">
+              Clear
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {plan.draftVisible ? (
+        <>
+          <label className="train-objective">
+            <span>Objective</span>
+            <input
+              onChange={(event) => onObjectiveChange(event.currentTarget.value)}
+              placeholder="What should this train-mode run accomplish?"
+              type="text"
+              value={plan.objective}
+            />
+          </label>
+
+          <div className="train-options">
+            <label>
+              <input
+                checked={plan.granular}
+                onChange={(event) => onGranularChange(event.currentTarget.checked)}
+                type="checkbox"
+              />
+              Step-by-step approval
+            </label>
+            <span>
+              {approvedCount}/{plan.steps.length} approved
+            </span>
+          </div>
+
+          <ol className="train-step-list">
+            {plan.steps.map((step, index) => (
+              <li className="train-step" data-approved={step.approved ? "true" : "false"} key={step.id}>
+                <label className="train-step-check">
+                  <input
+                    checked={step.approved}
+                    onChange={(event) => onStepApprovalChange(step.id, event.currentTarget.checked)}
+                    type="checkbox"
+                  />
+                  <span>{step.approved ? "Approved" : "Review"}</span>
+                </label>
+                <textarea
+                  aria-label={"Train step " + String(index + 1)}
+                  onChange={(event) => onStepTextChange(step.id, event.currentTarget.value)}
+                  rows={2}
+                  value={step.text}
+                />
+                <div className="train-step-actions">
+                  <button className="button button-compact" disabled={index === 0} onClick={() => onMoveStep(step.id, -1)} type="button">
+                    Up
+                  </button>
+                  <button
+                    className="button button-compact"
+                    disabled={index === plan.steps.length - 1}
+                    onClick={() => onMoveStep(step.id, 1)}
+                    type="button"
+                  >
+                    Down
+                  </button>
+                  <button className="button button-compact" onClick={() => onRemoveStep(step.id)} type="button">
+                    Remove
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ol>
+
+          <div className="train-footer">
+            <p>{ready ? "Ready to run. Press Send to execute the approved train plan." : trainPlanReadinessCopy(plan)}</p>
+            <div className="button-row">
+              <button className="button button-compact" onClick={onAddStep} type="button">
+                Add step
+              </button>
+              <button className="button button-compact" disabled={plan.steps.length === 0} onClick={onApproveAll} type="button">
+                Approve all
+              </button>
+            </div>
+          </div>
+        </>
+      ) : (
+        <p className="train-empty">
+          Type the objective, then press Send or Draft plan. The editable plan appears here before any tools run.
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -717,12 +1111,12 @@ function Message({
   return (
     <article className="message" data-role={message.role}>
       <small>{message.role}</small>
-      {blocks.map((block) =>
+      {blocks.map((block, index) =>
         block.kind === "tool-group" ? (
           <ToolPartGroup
             activeApprovalIds={activeApprovalIds}
             approveToolAlways={approveToolAlways}
-            key={block.key}
+            key={block.key + ":" + String(index)}
             parts={block.parts}
             respondToToolApproval={respondToToolApproval}
           />
@@ -730,7 +1124,7 @@ function Message({
           <MessagePart
             activeApprovalIds={activeApprovalIds}
             approveToolAlways={approveToolAlways}
-            key={block.key}
+            key={block.key + ":" + String(index)}
             part={block.part}
             respondToToolApproval={respondToToolApproval}
           />
@@ -777,11 +1171,11 @@ function ToolPartGroup({
         </span>
       </summary>
       <div className="tool-group-details">
-        {renderDetails ? parts.map(({ part, index }) => (
+        {renderDetails ? parts.map(({ part, index }, partIndex) => (
           <MessagePart
             activeApprovalIds={activeApprovalIds}
             approveToolAlways={approveToolAlways}
-            key={partKey(part, index)}
+            key={partKey(part, index) + ":" + String(partIndex)}
             part={part}
             respondToToolApproval={respondToToolApproval}
           />
@@ -916,6 +1310,693 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function CommandPalette({
+  onClose,
+  onQueryChange,
+  open,
+  query,
+  results
+}: {
+  onClose: () => void;
+  onQueryChange: (query: string) => void;
+  open: boolean;
+  query: string;
+  results: SearchResult[];
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const id = window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => window.clearTimeout(id);
+  }, [open]);
+
+  if (!open) return null;
+
+  return (
+    <div className="command-overlay" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-label="Search workspace"
+        aria-modal="true"
+        className="command-palette"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="command-input-row">
+          <input
+            aria-label="Search threads, artifacts, skills, and memories"
+            onChange={(event) => onQueryChange(event.target.value)}
+            placeholder="Search threads, artifacts, skills, memories..."
+            ref={inputRef}
+            value={query}
+          />
+          <button className="button button-compact" onClick={onClose} type="button">
+            Esc
+          </button>
+        </div>
+        <div className="command-tabs" aria-label="Search scopes">
+          <span>Threads</span>
+          <span>Artifacts</span>
+          <span>Memories</span>
+          <span>Agents</span>
+        </div>
+        <div className="command-results">
+          {results.length > 0 ? (
+            results.map((result, index) => (
+              <a className="command-result" href={result.target} key={result.id + ":" + String(index)} onClick={onClose}>
+                <span>{result.kind}</span>
+                <strong>{result.title}</strong>
+                <small>{result.detail}</small>
+              </a>
+            ))
+          ) : (
+            <p>No results yet. Try a message, artifact name, skill, or sub-agent.</p>
+          )}
+        </div>
+        <footer className="command-footer">Ctrl K opens search. Enter opens the selected result in its workspace surface.</footer>
+      </section>
+    </div>
+  );
+}
+
+function PersonaSidebar({
+  activeSubAgentCount,
+  focusComposer,
+  openSearch,
+  pendingApprovalCount,
+  summary
+}: {
+  activeSubAgentCount: number;
+  focusComposer: () => void;
+  openSearch: () => void;
+  pendingApprovalCount: number;
+  summary: CapabilitySummary | null;
+}) {
+  const artifactCount = summary?.artifacts?.artifacts?.length ?? 0;
+  const skillCount = summary?.skills?.skills?.length ?? 0;
+  const learningCount =
+    Number(summary?.learning?.memories?.pending ?? 0) +
+    Number(summary?.learning?.skills?.pending ?? 0);
+  const recentThreads = ["Current conversation", "Workspace brief", "Sub-agent reports"];
+
+  return (
+    <nav className="persona-sidebar" aria-label="Workspace navigation">
+      <button className="button button-primary sidebar-primary" onClick={focusComposer} type="button">
+        New Task
+      </button>
+      <button className="sidebar-link" onClick={openSearch} type="button">
+        Search <span>Ctrl K</span>
+      </button>
+      <a href="#artifact-canvas">
+        Library <span>{artifactCount}</span>
+      </a>
+      <a href="#learning">
+        Learning <span>{learningCount}</span>
+      </a>
+      <a href="#skills">
+        Skills <span>{skillCount}</span>
+      </a>
+      <div className="sidebar-divider" />
+      <small>Recent</small>
+      {recentThreads.map((thread) => (
+        <a href="#chat-feed" key={thread}>{thread}</a>
+      ))}
+      <div className="sidebar-divider" />
+      <a href="#subagents">
+        Sub-agents <span>{activeSubAgentCount}</span>
+      </a>
+      <a href="#runtime">
+        Approvals <span>{pendingApprovalCount}</span>
+      </a>
+    </nav>
+  );
+}
+
+function ArtifactStage({ summary }: { summary: CapabilitySummary | null }) {
+  const artifacts = summary?.artifacts?.artifacts ?? [];
+  const [mode, setMode] = useState<ArtifactCanvasMode>("single");
+  const [selectedKey, setSelectedKey] = useState("");
+  const [selectedVersion, setSelectedVersion] = useState("");
+  const [detail, setDetail] = useState<ArtifactDetailResponse | null>(null);
+  const [poppedArtifact, setPoppedArtifact] = useState(false);
+  const featured = artifacts.find((artifact) => artifact.key === selectedKey) ?? artifacts[0];
+  const learning = summary?.learning;
+  const skills = summary?.skills?.skills ?? [];
+
+  useEffect(() => {
+    if (!artifacts.length) {
+      setSelectedKey("");
+      setSelectedVersion("");
+      setDetail(null);
+      return;
+    }
+    if (!featured) {
+      setSelectedKey(artifacts[0]?.key ?? "");
+    }
+  }, [artifacts, featured]);
+
+  useEffect(() => {
+    if (!featured?.key) return;
+    const controller = new AbortController();
+    const params = new URLSearchParams({ key: featured.key, versions: "1" });
+    if (selectedVersion) params.set("version", selectedVersion);
+    optionalJsonFetch<ArtifactDetailResponse>("/artifacts?" + params.toString(), { signal: controller.signal })
+      .then((next) => {
+        if (!controller.signal.aborted) setDetail(next);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setDetail(null);
+      });
+    return () => controller.abort();
+  }, [featured?.key, selectedVersion]);
+
+  const versions = detail?.versions ?? [];
+  const artifactText = detail?.text ?? "";
+
+  return (
+    <section className="artifact-stage" id="artifact-canvas" aria-label="Artifact canvas">
+      <div className="artifact-stage-header">
+        <div>
+          <strong>{featured?.title || featured?.key || "No artifact selected"}</strong>
+          <small>{featured?.type || "Workspace canvas"}{featured?.versions ? " / v" + String(featured.versions) : ""}</small>
+        </div>
+        <div className="canvas-mode-toggle" aria-label="Canvas mode">
+          {(["single", "grid", "stack"] as const).map((nextMode) => (
+            <button
+              aria-pressed={mode === nextMode}
+              key={nextMode}
+              onClick={() => setMode(nextMode)}
+              type="button"
+            >
+              {titleCase(nextMode)}
+            </button>
+          ))}
+        </div>
+      </div>
+      {versions.length > 1 ? (
+        <label className="artifact-version-picker">
+          <span>Version</span>
+          <select onChange={(event) => setSelectedVersion(event.target.value)} value={selectedVersion}>
+            {versions.map((version) => (
+              <option key={version.versionKey} value={version.current ? "" : version.versionKey}>
+                {version.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      <div className={"artifact-preview artifact-preview-" + mode}>
+        {featured ? (
+          mode === "grid" ? (
+            artifacts.slice(0, 4).map((artifact, index) => (
+              <button className="artifact-grid-card" key={artifact.key + ":" + String(index)} onClick={() => setSelectedKey(artifact.key)} type="button">
+                <span>{artifact.type || "artifact"}</span>
+                <strong>{artifact.title || artifact.key}</strong>
+                <small>{artifact.uploaded ? formatRelativeTime(artifact.uploaded) : "Ready"}</small>
+              </button>
+            ))
+          ) : mode === "stack" ? (
+            <div className="artifact-stack">
+              {artifacts.slice(0, 8).map((artifact, index) => (
+                <button
+                  className="artifact-stack-card"
+                  key={artifact.key + ":" + String(index)}
+                  onClick={() => setSelectedKey(artifact.key)}
+                  style={{ transform: "translateY(" + String(index * 6) + "px)" }}
+                  type="button"
+                >
+                  <span>{artifact.type || "artifact"}</span>
+                  <strong>{artifact.title || artifact.key}</strong>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <ArtifactInlinePreview artifact={featured} text={artifactText} />
+          )
+        ) : (
+          <>
+            <span>Workspace</span>
+            <strong>Artifacts will appear here</strong>
+            <small>Documents, code, tables, images, and app previews</small>
+          </>
+        )}
+      </div>
+      {featured ? (
+        <button className="button button-compact artifact-popout-trigger" onClick={() => setPoppedArtifact(true)} type="button">
+          Pop out artifact
+        </button>
+      ) : null}
+      <div className="artifact-rail" aria-label="Artifact thumbnails">
+        {artifacts.slice(0, 6).map((artifact, index) => (
+          <button
+            aria-pressed={featured?.key === artifact.key}
+            className="artifact-thumb"
+            key={artifact.key + ":" + String(index)}
+            onClick={() => {
+              setSelectedKey(artifact.key);
+              setSelectedVersion("");
+            }}
+            type="button"
+          >
+            {artifact.type || "file"}
+          </button>
+        ))}
+        {artifacts.length === 0 ? <span className="artifact-thumb">empty</span> : null}
+      </div>
+      <div className="canvas-quicklinks">
+        <a href="#learning" id="learning">Train {learning ? formatLearningState(learning) : "ready"}</a>
+        <a href="#skills" id="skills">Skills {skills.length}</a>
+      </div>
+      {poppedArtifact && featured ? (
+        <div className="artifact-popout" role="dialog" aria-modal="true" aria-label="Artifact preview">
+          <div className="artifact-popout-window">
+            <div className="artifact-popout-header">
+              <div>
+                <strong>{featured.title || featured.key}</strong>
+                <small>{featured.type || "artifact"}</small>
+              </div>
+              <button className="button button-compact" onClick={() => setPoppedArtifact(false)} type="button">
+                Close
+              </button>
+            </div>
+            <ArtifactInlinePreview artifact={featured} text={artifactText} />
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ArtifactInlinePreview({ artifact, text }: { artifact: ArtifactListItem; text: string }) {
+  const type = artifact.type || "artifact";
+  if (type === "browser-session") {
+    return <BrowserSessionPreview artifact={artifact} session={parseBrowserSessionArtifact(text)} />;
+  }
+  if (type === "webpage" && text) {
+    return <iframe className="artifact-web-preview" sandbox="" srcDoc={text} title={artifact.title || artifact.key} />;
+  }
+  if (type === "image") {
+    return <ImageArtifactPreview artifact={artifact} text={text} />;
+  }
+  if (type === "slides") {
+    return <SlidesArtifactPreview artifact={artifact} text={text} />;
+  }
+  if (type === "diff" || isDiffArtifactKey(artifact.key)) {
+    return <DiffArtifactPreview artifact={artifact} text={text} />;
+  }
+  if (type === "table" && text) {
+    const rows = parseDelimitedRows(text).slice(0, 12);
+    if (rows.length > 0) {
+      const [header = [], ...body] = rows;
+      return (
+        <div className="artifact-table-preview">
+          <span>{type}</span>
+          <strong>{artifact.title || artifact.key}</strong>
+          <div className="artifact-table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  {header.map((cell, index) => <th key={String(index)}>{cell || "Column " + String(index + 1)}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {body.map((row, rowIndex) => (
+                  <tr key={String(rowIndex)}>
+                    {header.map((_cell, cellIndex) => <td key={String(cellIndex)}>{row[cellIndex] ?? ""}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+  }
+  return (
+    <div className="artifact-text-preview">
+      <span>{type}</span>
+      <strong>{artifact.title || artifact.key}</strong>
+      <small>{artifact.uploaded ? formatRelativeTime(artifact.uploaded) : "Ready"}</small>
+      {text ? <pre>{text.slice(0, 2400)}</pre> : <p>Open or generate content to preview this artifact.</p>}
+    </div>
+  );
+}
+
+function DiffArtifactPreview({ artifact, text }: { artifact: ArtifactListItem; text: string }) {
+  const patch = text.trim();
+  const stats = summarizePatch(patch);
+  return (
+    <div className="artifact-diff-preview">
+      <div className="artifact-preview-heading">
+        <span>diff</span>
+        <strong>{artifact.title || artifact.key}</strong>
+      </div>
+      <div className="artifact-diff-stats">
+        <span>{stats.files} files</span>
+        <span>+{stats.additions}</span>
+        <span>-{stats.deletions}</span>
+      </div>
+      {patch ? (
+        <Suspense fallback={<pre>{patch.slice(0, 2400)}</pre>}>
+          <PatchDiffRenderer patch={patch} />
+        </Suspense>
+      ) : (
+        <p>No patch content is available for this artifact.</p>
+      )}
+    </div>
+  );
+}
+
+function ImageArtifactPreview({ artifact, text }: { artifact: ArtifactListItem; text: string }) {
+  const source = imageSourceFromText(text);
+  const title = artifact.title || artifact.key;
+  return (
+    <div className="artifact-image-preview">
+      <div className="artifact-preview-heading">
+        <span>image</span>
+        <strong>{title}</strong>
+      </div>
+      {source ? (
+        <>
+          <div className="artifact-image-frame">
+            <img alt={title} src={source} />
+          </div>
+          <div className="artifact-preview-actions">
+            <a className="button button-compact" href={source} rel="noreferrer" target="_blank">Open</a>
+            <a className="button button-compact" download={artifact.key.split("/").pop() || "image"} href={source}>Download</a>
+          </div>
+        </>
+      ) : (
+        <p>Image content is available, but it is not a URL, data URL, markdown image, or base64 image payload.</p>
+      )}
+    </div>
+  );
+}
+
+function SlidesArtifactPreview({ artifact, text }: { artifact: ArtifactListItem; text: string }) {
+  const slides = parseSlidesArtifact(text);
+  const [index, setIndex] = useState(0);
+  const activeIndex = Math.min(index, Math.max(slides.length - 1, 0));
+  const slide = slides[activeIndex];
+
+  return (
+    <div className="artifact-slides-preview">
+      <div className="artifact-preview-heading">
+        <span>slides</span>
+        <strong>{artifact.title || artifact.key}</strong>
+      </div>
+      {slide ? (
+        <>
+          <div className="artifact-slide-frame">
+            {slide.title ? <h3>{slide.title}</h3> : null}
+            {slide.body ? <pre>{slide.body}</pre> : <p>No slide body.</p>}
+          </div>
+          <div className="artifact-slide-controls">
+            <button className="button button-compact" disabled={activeIndex <= 0} onClick={() => setIndex((value) => Math.max(0, value - 1))} type="button">Prev</button>
+            <span>{activeIndex + 1} / {Math.max(slides.length, 1)}</span>
+            <button className="button button-compact" disabled={activeIndex >= slides.length - 1} onClick={() => setIndex((value) => Math.min(slides.length - 1, value + 1))} type="button">Next</button>
+          </div>
+          {slide.notes ? <p className="artifact-slide-notes">{slide.notes}</p> : null}
+        </>
+      ) : (
+        <p>No slides found. Use JSON with a "slides" array or markdown slides separated by "---".</p>
+      )}
+    </div>
+  );
+}
+
+type BrowserSessionArtifact = {
+  mode?: string | null;
+  url?: string | null;
+  title?: string | null;
+  status?: string | null;
+  capturedAt?: string | null;
+  createdAt?: string | null;
+  sessionId?: string | null;
+  screenshotDataUrl?: string | null;
+  screenshotUrl?: string | null;
+  html?: string | null;
+  devtoolsFrontendUrl?: string | null;
+  takeoverUrl?: string | null;
+  webSocketDebuggerUrl?: string | null;
+  target?: BrowserSessionTarget | null;
+  targets?: BrowserSessionTarget[];
+  events?: Array<{
+    label?: string;
+    status?: string;
+    at?: string;
+  }>;
+};
+
+type BrowserSessionTarget = {
+  id?: string;
+  type?: string;
+  url?: string;
+  title?: string;
+  devtoolsFrontendUrl?: string;
+  webSocketDebuggerUrl?: string;
+};
+
+function BrowserSessionPreview({
+  artifact,
+  session
+}: {
+  artifact: ArtifactListItem;
+  session: BrowserSessionArtifact | null;
+}) {
+  const [streamFrame, setStreamFrame] = useState("");
+  const [streamStatus, setStreamStatus] = useState<"idle" | "connecting" | "streaming" | "failed" | "done">("idle");
+  const title = session?.title || artifact.title || artifact.key;
+  const primaryTarget = session?.target || session?.targets?.find((target) => target.devtoolsFrontendUrl || target.url) || null;
+  const liveViewUrl = session?.devtoolsFrontendUrl || session?.takeoverUrl || primaryTarget?.devtoolsFrontendUrl || "";
+  const webSocketUrl = session?.webSocketDebuggerUrl || primaryTarget?.webSocketDebuggerUrl || "";
+  const targetUrl = session?.url || primaryTarget?.url || "about:blank";
+  const screenshot = session?.screenshotDataUrl || session?.screenshotUrl || "";
+  const frameStreamUrl = session?.mode === "live" && session?.sessionId && primaryTarget?.id
+    ? `/browser/sessions/${encodeURIComponent(session.sessionId)}/targets/${encodeURIComponent(primaryTarget.id)}/frames?fps=4`
+    : "";
+  const frameStreamStatusUrl = session?.mode === "live" && session?.sessionId && primaryTarget?.id
+    ? `/browser/sessions/${encodeURIComponent(session.sessionId)}/targets/${encodeURIComponent(primaryTarget.id)}/frames/status?fps=4`
+    : "";
+  const liveFrame = streamFrame || screenshot;
+  const status = session?.status || "ready";
+  const timestamp = session?.capturedAt || session?.createdAt || null;
+
+  useEffect(() => {
+    if (!frameStreamUrl || !frameStreamStatusUrl) {
+      setStreamFrame("");
+      setStreamStatus("idle");
+      return undefined;
+    }
+    let cancelled = false;
+    let events: EventSource | null = null;
+    setStreamStatus("connecting");
+    void fetch(frameStreamStatusUrl, { cache: "no-store" })
+      .then((response) => response.json() as Promise<{ hasWebSocketDebuggerUrl?: boolean }>)
+      .then((data) => {
+        if (cancelled) return;
+        if (!data.hasWebSocketDebuggerUrl) {
+          setStreamStatus("failed");
+          return;
+        }
+        events = new EventSource(frameStreamUrl);
+        events.addEventListener("status", (event) => {
+          const eventData = parseJsonEventData(event);
+          setStreamStatus(eventData?.status === "streaming" ? "streaming" : "connecting");
+        });
+        events.addEventListener("frame", (event) => {
+          const eventData = parseJsonEventData(event);
+          if (typeof eventData?.screenshotDataUrl === "string") {
+            setStreamFrame(eventData.screenshotDataUrl);
+            setStreamStatus("streaming");
+          }
+        });
+        events.addEventListener("done", () => setStreamStatus("done"));
+        events.addEventListener("error", () => setStreamStatus("failed"));
+        events.onerror = () => setStreamStatus("failed");
+      })
+      .catch(() => {
+        if (!cancelled) setStreamStatus("failed");
+      });
+    return () => {
+      cancelled = true;
+      events?.close();
+    };
+  }, [frameStreamUrl, frameStreamStatusUrl]);
+
+  return (
+    <div className="artifact-browser-session">
+      <div className="browser-chrome">
+        <span className="browser-dots" aria-hidden="true"><i /><i /><i /></span>
+        <code>{targetUrl}</code>
+        <span className="pill" data-state={status === "captured" ? "ready" : undefined}>{status}</span>
+      </div>
+      <div className="browser-viewport">
+        {liveFrame ? (
+          <img alt={title} src={liveFrame} />
+        ) : liveViewUrl ? (
+          <iframe
+            allow="clipboard-read; clipboard-write; fullscreen"
+            referrerPolicy="no-referrer"
+            src={liveViewUrl}
+            title={title + " live view"}
+          />
+        ) : session?.html ? (
+          <iframe sandbox="" srcDoc={session.html} title={title} />
+        ) : (
+          <div className="browser-empty-state">
+            <strong>{title}</strong>
+            <small>Browser session metadata is ready. Capture a snapshot to show the viewport.</small>
+          </div>
+        )}
+      </div>
+      <div className="browser-session-actions">
+        {liveViewUrl ? <a className="button button-compact" href={liveViewUrl} rel="noreferrer" target="_blank">Live View</a> : null}
+        {webSocketUrl ? <span title={webSocketUrl}>CDP session ready</span> : null}
+        {frameStreamUrl ? <span className="browser-stream-status" data-state={streamStatus}>{streamStatus === "streaming" ? "Frames 4 fps" : streamStatus}</span> : null}
+        <span>{timestamp ? "Updated " + formatRelativeTime(timestamp) : "Ready for Browser Run sessions"}</span>
+      </div>
+      {session?.sessionId || primaryTarget?.id ? (
+        <div className="browser-session-meta">
+          {session?.sessionId ? <span>Session <code>{session.sessionId}</code></span> : null}
+          {primaryTarget?.id ? <span>Target <code>{primaryTarget.id}</code></span> : null}
+        </div>
+      ) : null}
+      {session?.events?.length ? (
+        <ul className="browser-session-events">
+          {session.events.slice(0, 4).map((event, index) => (
+            <li key={String(index)}>
+              <span>{event.label || "Browser event"}</span>
+              <small>{event.status || "recorded"}{event.at ? " / " + formatRelativeTime(event.at) : ""}</small>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function parseJsonEventData(event: Event): Record<string, unknown> | null {
+  const message = event as MessageEvent<string>;
+  try {
+    return JSON.parse(message.data) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function parseBrowserSessionArtifact(text: string): BrowserSessionArtifact | null {
+  if (!text.trim()) return null;
+  try {
+    const value = JSON.parse(text) as BrowserSessionArtifact;
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+type SlidePreview = {
+  title?: string;
+  body?: string;
+  notes?: string;
+};
+
+function isDiffArtifactKey(key: string): boolean {
+  return /\.(diff|patch)$/i.test(key);
+}
+
+function summarizePatch(patch: string): { files: number; additions: number; deletions: number } {
+  const lines = patch.split(/\r?\n/);
+  const files = new Set<string>();
+  let additions = 0;
+  let deletions = 0;
+  for (const line of lines) {
+    if (line.startsWith("diff --git ")) files.add(line);
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) additions += 1;
+    if (line.startsWith("-")) deletions += 1;
+  }
+  return {
+    files: files.size || (patch.trim() ? 1 : 0),
+    additions,
+    deletions
+  };
+}
+
+function imageSourceFromText(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  if (/^data:image\//i.test(trimmed)) return trimmed;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  const markdownMatch = trimmed.match(/!\[[^\]]*]\(([^)]+)\)/);
+  if (markdownMatch?.[1]) return markdownMatch[1].trim();
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    const candidate = parsed.src ?? parsed.url ?? parsed.dataUrl ?? parsed.image;
+    if (typeof candidate === "string") return imageSourceFromText(candidate);
+  } catch {
+    // Fall through to raw base64 detection.
+  }
+  if (/^[A-Za-z0-9+/=\s]+$/.test(trimmed) && trimmed.replace(/\s/g, "").length > 120) {
+    return "data:image/png;base64," + trimmed.replace(/\s/g, "");
+  }
+  return "";
+}
+
+function parseSlidesArtifact(text: string): SlidePreview[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    const rawSlides = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as { slides?: unknown }).slides)
+        ? (parsed as { slides: unknown[] }).slides
+        : [];
+    if (rawSlides.length > 0) {
+      return rawSlides.map((item, index) => {
+        if (typeof item === "string") return { title: "Slide " + String(index + 1), body: item };
+        if (item && typeof item === "object") {
+          const record = item as Record<string, unknown>;
+          const title = typeof record.title === "string" ? record.title : typeof record.heading === "string" ? record.heading : "Slide " + String(index + 1);
+          const body = typeof record.body === "string"
+            ? record.body
+            : Array.isArray(record.bullets)
+              ? record.bullets.map((bullet) => "- " + String(bullet)).join("\n")
+              : typeof record.content === "string"
+                ? record.content
+                : "";
+          const notes = typeof record.notes === "string" ? record.notes : "";
+          return notes ? { title, body, notes } : { title, body };
+        }
+        return { title: "Slide " + String(index + 1), body: String(item) };
+      });
+    }
+  } catch {
+    // Markdown slides are parsed below.
+  }
+
+  return trimmed
+    .split(/\n-{3,}\n/g)
+    .map((chunk, index) => {
+      const lines = chunk.trim().split(/\r?\n/);
+      const first = lines[0]?.replace(/^#+\s*/, "").trim();
+      const body = lines.slice(first ? 1 : 0).join("\n").trim();
+      return { title: first || "Slide " + String(index + 1), body };
+    })
+    .filter((slide) => slide.title || slide.body);
+}
+
+function parseDelimitedRows(text: string): string[][] {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const delimiter = lines.some((line) => line.includes("\t")) ? "\t" : ",";
+  return lines.map((line) =>
+    line
+      .split(delimiter)
+      .map((cell) => cell.trim().replace(/^"|"$/g, ""))
+  );
+}
+
 function HostedAgentPanel({ copied, onCopy }: { copied: boolean; onCopy: () => void }) {
   const origin = typeof window === "undefined" ? "https://your-agent.workers.dev" : window.location.origin;
   return (
@@ -952,6 +2033,223 @@ function HostedAgentPanel({ copied, onCopy }: { copied: boolean; onCopy: () => v
         <Metric label="Personal agent" value="Prompt, brain, skills" />
         <Metric label="Sub-agents" value="Purpose, mode, model" />
         <Metric label="Runtime" value="Model, approvals, executor" />
+      </div>
+    </section>
+  );
+}
+
+function BrowserRunDiagnosticsPanel({
+  diagnostics,
+  loading,
+  onRefresh,
+  onRun
+}: {
+  diagnostics: BrowserDiagnosticsResponse | null;
+  loading: boolean;
+  onRefresh: () => void;
+  onRun: () => void;
+}) {
+  const stages = diagnostics?.stages ?? [];
+  const state = browserDiagnosticsPillState(diagnostics);
+  return (
+    <section className="browser-diagnostics-panel" aria-label="Browser Run diagnostics">
+      <div className="section-heading">
+        <div>
+          <h3>Browser Run</h3>
+          <p>{diagnostics?.summary ?? "Check Browser Rendering credentials, API access, CDP, and frame capture."}</p>
+        </div>
+        <span className="pill" data-state={state}>{diagnostics ? titleCase(diagnostics.status) : "Checking"}</span>
+      </div>
+      <div className="browser-diagnostics-actions">
+        <button className="button button-compact" disabled={loading} onClick={onRefresh} type="button">
+          Refresh
+        </button>
+        <button className="button button-compact button-primary" disabled={loading} onClick={onRun} type="button">
+          {loading ? "Running" : "Run live check"}
+        </button>
+      </div>
+      {stages.length > 0 ? (
+        <ol className="diagnostic-stage-list">
+          {stages.map((stage) => (
+            <li data-state={stage.status} key={stage.id}>
+              <span>{stage.label}</span>
+              <small>{stage.summary}</small>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="diagnostic-empty">No Browser Run diagnostics have been loaded yet.</p>
+      )}
+    </section>
+  );
+}
+
+function CapabilityCanvas({
+  learningActionId,
+  onCurateLearning,
+  onEditLearning,
+  onRefresh,
+  summary
+}: {
+  learningActionId: string | null;
+  onCurateLearning: (id: string, status: LearningSuggestionStatus) => void;
+  onEditLearning: (suggestion: LearningSuggestion) => void;
+  onRefresh: () => void;
+  summary: CapabilitySummary | null;
+}) {
+  const artifacts = summary?.artifacts?.artifacts ?? [];
+  const skills = summary?.skills?.skills ?? [];
+  const learning = summary?.learning;
+  const learningSuggestions = learning?.suggestions?.items ?? [];
+  const pendingLearningSuggestions = learningSuggestions.filter((suggestion) => suggestion.status === "pending");
+  const mcpServers = summary?.mcp?.servers ?? [];
+  const mcpObservability = summary?.mcpObservability;
+  const contributions = summary?.contributions;
+  const mcpEvents = mcpObservability?.recentEvents ?? [];
+  const observedServers = mcpObservability?.servers ?? [];
+  const executorStatus = summary?.executor?.status ?? "checking";
+
+  return (
+    <section className="capability-canvas" aria-label="Agent workspace canvas">
+      <div className="section-heading">
+        <div>
+          <h3>Workspace Canvas</h3>
+          <p>Artifacts, learning, skills, and execution status exposed through the hosted-agent SDK.</p>
+        </div>
+        <button className="button button-compact" onClick={onRefresh} type="button">
+          Refresh
+        </button>
+      </div>
+
+      <div className="canvas-grid">
+        <Metric label="Artifacts" value={summary ? formatCapabilityCount(artifacts.length, summary.artifacts?.available) : "Loading"} />
+        <Metric label="Learning" value={learning ? formatLearningState(learning) : "Loading"} />
+        <Metric label="Skills" value={summary ? formatCapabilityCount(skills.length, summary.skills?.available) : "Loading"} />
+        <Metric label="Executor" value={titleCase(executorStatus)} />
+        <Metric label="PR lane" value={contributions ? (contributions.available ? "Ready" : "Token needed") : "Loading"} />
+      </div>
+
+      <div className="canvas-section">
+        <strong>Library preview</strong>
+        {artifacts.length > 0 ? (
+          <ul className="compact-list">
+            {artifacts.slice(0, 4).map((artifact, index) => (
+              <li key={artifact.key + ":" + String(index)}>
+                <span>{artifact.title || artifact.key}</span>
+                <small>{artifact.type || "artifact"}</small>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>{summary?.artifacts?.note ?? "No artifacts yet. Generated documents, code, and app previews will appear here when AGENT_STORAGE is bound."}</p>
+        )}
+      </div>
+
+      <div className="canvas-section">
+        <strong>Active capabilities</strong>
+        <div className="subagent-chip-row">
+          {skills.slice(0, 6).map((skill, index) => (
+            <span className="pill" data-state={skill.enabled ? "ready" : undefined} key={skill.id + ":" + String(index)}>
+              {skill.label}
+            </span>
+          ))}
+          {mcpServers.slice(0, 4).map((server, index) => (
+            <span className="pill" data-state={server.configured ? "ready" : undefined} key={server.id + ":" + String(index)}>
+              {server.label}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="canvas-section">
+        <strong>Contribution lane</strong>
+        <p>
+          {contributions?.note ?? "The agent can prepare upstream pull requests when GitHub credentials are configured."}
+        </p>
+        <div className="subagent-chip-row">
+          <span className="pill" data-state={contributions?.available ? "ready" : undefined}>
+            {contributions?.repository ?? "NeoFlux-Holdings/OpenThink"}
+          </span>
+          <span className="pill" data-state={contributions?.artifactSourceAvailable ? "ready" : undefined}>
+            Artifacts source
+          </span>
+        </div>
+      </div>
+
+      <div className="canvas-section mcp-observability-panel" id="mcp-observability">
+        <div className="canvas-section-heading">
+          <strong>MCP activity</strong>
+          <small>{mcpObservability ? formatMcpObservabilityState(mcpObservability) : "Loading"}</small>
+        </div>
+        {observedServers.length > 0 ? (
+          <div className="mcp-observability-grid">
+            {observedServers.slice(0, 4).map((server, index) => (
+              <div className="mcp-server-card" key={server.name + ":" + String(index)}>
+                <span>{server.name}</span>
+                <small>{server.transport || "unknown"} / {server.calls ?? 0} calls / {server.failures ?? 0} failures</small>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {mcpEvents.length > 0 ? (
+          <ul className="compact-list mcp-event-list">
+            {mcpEvents.slice(0, 5).map((event, index) => (
+              <li key={event.id + ":" + String(index)}>
+                <span>{event.server} / {event.tool}</span>
+                <small>{event.status} / {event.latencyMs}ms / {truncateText(event.summary, 90)}</small>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>{mcpObservability?.note ?? "MCP and executor activity will appear here after the first tool discovery, executor call, or workspace RPC call."}</p>
+        )}
+      </div>
+
+      <div className="canvas-section learning-review-panel" id="learning">
+        <div className="canvas-section-heading">
+          <strong>Learning review</strong>
+          <small>{learning ? formatLearningState(learning) : "Loading"}</small>
+        </div>
+        {pendingLearningSuggestions.length > 0 ? (
+          <ul className="learning-suggestions">
+            {pendingLearningSuggestions.slice(0, 4).map((suggestion, index) => (
+              <li key={suggestion.id + ":" + String(index)}>
+                <div>
+                  <span>{suggestion.title}</span>
+                  <small>{suggestion.kind} / {truncateText(suggestion.summary, 120)}</small>
+                </div>
+                <div className="learning-actions">
+                  <button
+                    className="button button-compact"
+                    disabled={learningActionId === suggestion.id}
+                    onClick={() => onCurateLearning(suggestion.id, "accepted")}
+                    type="button"
+                  >
+                    Accept
+                  </button>
+                  <button
+                    className="button button-compact"
+                    disabled={learningActionId === suggestion.id}
+                    onClick={() => onEditLearning(suggestion)}
+                    type="button"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    className="button button-compact"
+                    disabled={learningActionId === suggestion.id}
+                    onClick={() => onCurateLearning(suggestion.id, "rejected")}
+                    type="button"
+                  >
+                    Reject
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>{learning ? "No pending learning suggestions. Accepted and rejected items stay in the learning log." : "Learning status is loading."}</p>
+        )}
       </div>
     </section>
   );
@@ -999,7 +2297,7 @@ function SubAgentConsole({
   const pausedCount = subAgents.filter((subAgent) => subAgent.status === "paused").length;
 
   return (
-    <section className="subagent-console" aria-label="Sub-agent console">
+    <section className="subagent-console" id="subagents" aria-label="Sub-agent console">
       <div className="section-heading">
         <div>
           <h3>Agent Workstreams</h3>
@@ -1088,11 +2386,11 @@ function SubAgentConsole({
 
       <div className="subagent-roster" aria-label="Tracked sub-agents">
         {subAgents.length ? (
-          subAgents.map((subAgent) => (
+          subAgents.map((subAgent, index) => (
             <button
               className="subagent-row"
               data-active={String(selected?.id === subAgent.id)}
-              key={subAgent.id}
+              key={subAgent.id + ":" + String(index)}
               onClick={() => onSelect(subAgent.id)}
               type="button"
             >
@@ -1123,8 +2421,8 @@ function SubAgentConsole({
               <span className="pill">{selected.mode}</span>
               <span className="pill">{selected.brain}</span>
               <span className="pill">{selected.model}</span>
-              {selected.skills.slice(0, 3).map((skill) => (
-                <span className="pill" key={skill}>{skill}</span>
+              {selected.skills.slice(0, 3).map((skill, index) => (
+                <span className="pill" key={skill + ":" + String(index)}>{skill}</span>
               ))}
             </div>
           </div>
@@ -1160,8 +2458,8 @@ function SubAgentConsole({
           </div>
           <div className="subagent-messages" aria-live="polite">
             {messages.length ? (
-              messages.slice(-6).map((message) => (
-                <div className="subagent-message" data-role={message.role} key={message.id}>
+              messages.slice(-6).map((message, index) => (
+                <div className="subagent-message" data-role={message.role} key={message.id + ":" + String(index)}>
                   <small>{message.role}</small>
                   <p>{message.content}</p>
                 </div>
@@ -1294,8 +2592,130 @@ function readyStateLabel(value: number) {
   return "Disconnected";
 }
 
+function formatSocketClose(event: CloseEvent) {
+  const code = event.code ? `code ${event.code}` : "no close code";
+  const reason = event.reason ? `, ${event.reason}` : "";
+  const cleanliness = event.wasClean ? "clean" : "unclean";
+  return `Closed ${cleanliness} (${code}${reason})`;
+}
+
 function formatJson(value: unknown) {
   return JSON.stringify(value, null, 2);
+}
+
+function searchPaletteResults(
+  query: string,
+  messages: UIMessage[],
+  activeApprovalIds: ReadonlySet<string>,
+  summary: CapabilitySummary | null,
+  subAgents: SubAgent[]
+): SearchResult[] {
+  const normalizedQuery = normalizeWhitespace(query).toLowerCase();
+  const baseResults: SearchResult[] = [
+    {
+      id: "runtime",
+      kind: "Runtime",
+      title: "Runtime and approvals",
+      detail: "Connection, model, Code Mode, executor, sandbox, and tool approvals.",
+      target: "#runtime"
+    },
+    {
+      id: "artifact-canvas",
+      kind: "Artifact",
+      title: "Artifact canvas",
+      detail: "Documents, code, tables, generated app previews, and library items.",
+      target: "#artifact-canvas"
+    }
+  ];
+
+  const messageResults = messages
+    .flatMap((message, index): SearchResult[] => {
+      const text = messageSearchText(message, activeApprovalIds);
+      if (!text) return [];
+      return [{
+        id: `message-${message.id || index}`,
+        kind: "Thread" as const,
+        title: message.role === "user" ? "User message" : "Assistant message",
+        detail: truncateText(text, 120),
+        target: "#chat-feed"
+      }];
+    });
+
+  const artifactResults = (summary?.artifacts?.artifacts ?? []).map((artifact) => ({
+    id: `artifact-${artifact.key}`,
+    kind: "Artifact" as const,
+    title: artifact.title || artifact.key,
+    detail: [artifact.type || "artifact", artifact.uploaded ? formatRelativeTime(artifact.uploaded) : ""].filter(Boolean).join(" / "),
+    target: "#artifact-canvas"
+  }));
+
+  const skillResults = (summary?.skills?.skills ?? []).map((skill) => ({
+    id: `skill-${skill.id}`,
+    kind: "Skill" as const,
+    title: skill.label,
+    detail: skill.enabled ? "Enabled skill" : "Available skill",
+    target: "#skills"
+  }));
+
+  const memoryResults = (summary?.learning?.memories?.items ?? []).map((item, index) => ({
+    id: `memory-${index}`,
+    kind: "Memory" as const,
+    title: "Memory suggestion",
+    detail: truncateText(unknownSearchText(item), 120),
+    target: "#learning"
+  }));
+
+  const subAgentResults = subAgents.map((subAgent) => ({
+    id: `subagent-${subAgent.id}`,
+    kind: "Sub-agent" as const,
+    title: subAgent.name,
+    detail: truncateText(`${subAgent.status} / ${subAgent.purpose} / ${subAgent.summary}`, 120),
+    target: "#subagents"
+  }));
+
+  const allResults = [
+    ...baseResults,
+    ...messageResults,
+    ...artifactResults,
+    ...memoryResults,
+    ...skillResults,
+    ...subAgentResults
+  ];
+
+  if (!normalizedQuery) return allResults.slice(0, 10);
+  return allResults
+    .filter((result) => `${result.kind} ${result.title} ${result.detail}`.toLowerCase().includes(normalizedQuery))
+    .slice(0, 14);
+}
+
+function messageSearchText(message: UIMessage, activeApprovalIds: ReadonlySet<string>) {
+  return compactMessageParts(message.parts)
+    .filter(({ part }) => partHasVisibleContent(part, activeApprovalIds))
+    .map(({ part }) => {
+      if (isTextUIPart(part)) return part.text;
+      if (isToolUIPart(part)) {
+        const name = toolDisplayTitle(getToolName(part), getToolInput(part));
+        const state = toolStateLabel(toolPartDisplayState(part, activeApprovalIds));
+        return `${name} ${state}`;
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+function unknownSearchText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const preferred = record.text ?? record.summary ?? record.label ?? record.title ?? record.id;
+    if (typeof preferred === "string") return preferred;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value ?? "");
+  }
 }
 
 type McpServerState = {
@@ -1307,6 +2727,8 @@ type McpServerState = {
 type RuntimeHealth = {
   cloudAgentInstance?: {
     execution?: RuntimeExecutionState;
+    codeMode?: RuntimeCodeModeState;
+    workspace?: RuntimeWorkspaceState;
   };
 };
 
@@ -1321,6 +2743,202 @@ type RuntimeExecutionPlane = {
   configured?: boolean;
   status?: string;
   default?: boolean;
+};
+
+type RuntimeCodeModeState = {
+  enabled?: boolean;
+  default?: boolean;
+  toolShape?: string;
+};
+
+type RuntimeWorkspaceState = {
+  firstClass?: boolean;
+  orchestrator?: {
+    enabled?: boolean;
+    autoSpunUp?: boolean;
+    className?: string;
+  };
+  contextStore?: {
+    vectorizeConfigured?: boolean;
+  };
+};
+
+type BrowserDiagnosticsResponse = {
+  ok: boolean;
+  status: string;
+  mode: "read-only" | "live" | string;
+  summary: string;
+  stages: BrowserDiagnosticsStage[];
+  accountIdConfigured?: boolean;
+  tokenConfigured?: boolean;
+  requiredPermission?: string;
+  docs?: string;
+  sessionId?: string;
+  targetId?: string;
+  hasWebSocketDebuggerUrl?: boolean;
+  frameCaptured?: boolean;
+  frameBytes?: number;
+  error?: string;
+};
+
+type BrowserDiagnosticsStage = {
+  id: string;
+  label: string;
+  status: "complete" | "warning" | "error" | "skipped" | string;
+  summary: string;
+  detail?: string;
+  at?: string;
+};
+
+type CapabilitySummary = {
+  skills: SkillListResponse | null;
+  learning: LearningResponse | null;
+  artifacts: ArtifactListResponse | null;
+  contributions: ContributionStatusResponse | null;
+  executor: ExecutorResponse | null;
+  mcp: McpServerCatalogResponse | null;
+  mcpObservability: McpObservabilityResponse | null;
+};
+
+type SearchResult = {
+  id: string;
+  kind: "Thread" | "Artifact" | "Memory" | "Skill" | "Sub-agent" | "Runtime";
+  title: string;
+  detail: string;
+  target: string;
+};
+
+type SkillListResponse = {
+  available?: boolean;
+  skills?: Array<{
+    id: string;
+    label: string;
+    enabled: boolean;
+  }>;
+  note?: string;
+};
+
+type LearningResponse = {
+  status?: string;
+  trainMode?: {
+    available?: boolean;
+    teachMode?: boolean;
+  };
+  memories?: {
+    available?: boolean;
+    pending?: number;
+    items?: unknown[];
+  };
+  skills?: {
+    available?: boolean;
+    pending?: number;
+    suggestions?: LearningSuggestion[];
+  };
+  suggestions?: {
+    pending?: number;
+    accepted?: number;
+    rejected?: number;
+    items?: LearningSuggestion[];
+  };
+};
+
+type LearningSuggestionStatus = "pending" | "accepted" | "rejected";
+
+type LearningSuggestion = {
+  id: string;
+  kind: "memory" | "skill" | "rubric" | "workflow" | string;
+  title: string;
+  summary: string;
+  status: LearningSuggestionStatus;
+  source?: string;
+  updatedAt?: string;
+};
+
+type ArtifactListItem = {
+  key: string;
+  title?: string;
+  type?: string;
+  uploaded?: string | null;
+  size?: number | null;
+  versions?: number;
+};
+
+type ArtifactVersion = {
+  key: string;
+  versionKey: string;
+  label: string;
+  current?: boolean;
+  uploaded?: string | null;
+  size?: number | null;
+};
+
+type ArtifactDetailResponse = {
+  key: string;
+  versionKey?: string;
+  title?: string;
+  type?: string;
+  text?: string;
+  versions?: ArtifactVersion[];
+};
+
+type ArtifactCanvasMode = "single" | "grid" | "stack";
+
+type ArtifactListResponse = {
+  available?: boolean;
+  note?: string;
+  artifacts?: ArtifactListItem[];
+};
+
+type ContributionStatusResponse = {
+  available?: boolean;
+  endpoint?: string;
+  repository?: string;
+  baseBranch?: string;
+  tokenConfigured?: boolean;
+  artifactSourceAvailable?: boolean;
+  sandboxSourceAvailable?: boolean;
+  note?: string;
+};
+
+type ExecutorResponse = {
+  configured?: boolean;
+  status?: string;
+};
+
+type McpServerCatalogResponse = {
+  servers?: Array<{
+    id: string;
+    label: string;
+    configured?: boolean;
+  }>;
+};
+
+type McpObservabilityResponse = {
+  available?: boolean;
+  status?: string;
+  note?: string;
+  totals?: {
+    calls?: number;
+    failures?: number;
+    servers?: number;
+  };
+  servers?: Array<{
+    name: string;
+    transport?: string;
+    calls?: number;
+    failures?: number;
+    avgLatencyMs?: number;
+  }>;
+  recentEvents?: Array<{
+    id: string;
+    server: string;
+    tool: string;
+    transport?: string;
+    status: string;
+    latencyMs: number;
+    summary: string;
+    createdAt?: string;
+  }>;
 };
 
 type SubAgentStatus = "ready" | "working" | "paused" | "archived";
@@ -1448,7 +3066,11 @@ function hostedAgentSdkSnippet(baseUrl = "https://your-agent.workers.dev") {
     '  mode: "hybrid",',
     '  skills: ["cloudflare", "release", "testing"]',
     "});",
-    'await agent.sendSubAgentMessage(child.subAgent.id, "Inspect the current deploy path.");'
+    'await agent.sendSubAgentMessage(child.subAgent.id, "Inspect the current deploy path.");',
+    "await agent.addMemory('Prefer short deploy-readiness briefs.');",
+    "const artifacts = await agent.listArtifacts();",
+    "const learning = await agent.learning();",
+    "console.log(profile.kind, artifacts.available, learning.trainMode.available);"
   ].join("\n");
 }
 
@@ -1798,6 +3420,15 @@ function summarizeParsedToolOutput(value: unknown): string {
   const error = textField(record, "error") ?? textField(record, "message");
   if (error && (record.success === false || "error" in record)) return "Error: " + truncateText(error, 180);
 
+  const directUrl = textField(record, "url") ?? textField(record, "deployment_url") ?? textField(record, "preview_url");
+  if (directUrl) return "Created or updated resource: " + directUrl;
+
+  const endpointSummaryText = summarizeEndpointCollections(record);
+  if (endpointSummaryText) return endpointSummaryText;
+
+  const operationSummary = textField(record, "summary") ?? textField(record, "operation");
+  if (operationSummary) return truncateText(operationSummary, 180);
+
   const result = record.result;
   const resultRecord = asRecord(result);
   if (resultRecord) {
@@ -1814,6 +3445,28 @@ function summarizeParsedToolOutput(value: unknown): string {
   const nestedText = toolContentText(record);
   if (nestedText && nestedText !== String(value)) return truncateText(normalizeWhitespace(nestedText), 220);
   return "Returned structured data.";
+}
+
+function summarizeEndpointCollections(record: Record<string, unknown>) {
+  const sections = [
+    ["workerEndpoints", "Worker endpoint"],
+    ["workers", "Worker endpoint"],
+    ["pagesEndpoints", "Pages endpoint"],
+    ["pages", "Pages endpoint"],
+    ["routes", "route"]
+  ] as const;
+
+  for (const [key, label] of sections) {
+    const value = record[key];
+    if (!Array.isArray(value) || value.length === 0) continue;
+    const endpoints = value.map(endpointSummary).filter((item): item is string => Boolean(item));
+    if (endpoints.length > 0) {
+      return "Found " + pluralize(value.length, label) + ": " + formatInlineList(endpoints, 3);
+    }
+    return "Found " + pluralize(value.length, label) + ".";
+  }
+
+  return null;
 }
 
 function endpointSummary(value: unknown): string | null {
@@ -2193,7 +3846,19 @@ function formatMcpStatus(readyCount: number, totalCount: number) {
 function formatToolApprovalPolicy(policy: string) {
   if (policy === "ask-every-time") return "Ask every time";
   if (policy === "allow-all") return "Allow all";
+  if (policy === "full-auto") return "Full auto";
   return "Auto";
+}
+
+function formatCodeMode(state: RuntimeCodeModeState | undefined) {
+  if (!state) return "Default on";
+  if (state.enabled === false) return "Off";
+  return state.toolShape ? `On (${state.toolShape})` : "On";
+}
+
+function formatWorkspaceState(state: RuntimeWorkspaceState | undefined) {
+  if (!state?.orchestrator?.enabled) return "Default pending";
+  return state.orchestrator.autoSpunUp ? "Orchestrator ready" : "Manual";
 }
 
 function formatToolAllowlist(count: number) {
@@ -2205,6 +3870,190 @@ function formatSubAgentMode(mode: SubAgentMode) {
   if (mode === "agents-sdk") return "Chat/state";
   if (mode === "executor") return "Executor";
   return "Hybrid";
+}
+
+let trainStepIdSequence = 0;
+
+function defaultTrainPlanState(): TrainPlanState {
+  return {
+    objective: "",
+    steps: [],
+    draftVisible: false,
+    granular: false
+  };
+}
+
+function createTrainStep(text: string, approved = false): TrainStep {
+  trainStepIdSequence += 1;
+  return {
+    id: "train-step-" + Date.now().toString(36) + "-" + String(trainStepIdSequence),
+    text,
+    approved
+  };
+}
+
+function draftTrainPlan(objectiveText: string, previous?: TrainPlanState): TrainPlanState {
+  const objective = normalizeTrainObjective(objectiveText);
+  const steps = [
+    "Confirm the objective, assumptions, constraints, and success criteria.",
+    "Inspect the current runtime, tools, data, and affected product surfaces.",
+    "Propose the smallest useful implementation path, including risks and expected artifacts.",
+    "Execute only the approved plan, stopping if a material risk or missing permission appears.",
+    "Verify the result, summarize what changed, and suggest whether this should become a reusable skill."
+  ];
+
+  return {
+    objective,
+    steps: steps.map((step) => createTrainStep(step)),
+    draftVisible: true,
+    granular: previous?.granular ?? false
+  };
+}
+
+function normalizeTrainObjective(text: string) {
+  return text.replace(/^\/train\b/i, "").trim();
+}
+
+function addTrainStep(plan: TrainPlanState): TrainPlanState {
+  return {
+    ...plan,
+    draftVisible: true,
+    steps: [
+      ...plan.steps,
+      createTrainStep("Add the next approved step here.")
+    ]
+  };
+}
+
+function updateTrainStep(
+  plan: TrainPlanState,
+  id: string,
+  updates: Partial<Pick<TrainStep, "approved" | "text">>
+): TrainPlanState {
+  return {
+    ...plan,
+    draftVisible: true,
+    steps: plan.steps.map((step) => (step.id === id ? { ...step, ...updates } : step))
+  };
+}
+
+function removeTrainStep(plan: TrainPlanState, id: string): TrainPlanState {
+  return {
+    ...plan,
+    draftVisible: true,
+    steps: plan.steps.filter((step) => step.id !== id)
+  };
+}
+
+function moveTrainStep(plan: TrainPlanState, id: string, direction: -1 | 1): TrainPlanState {
+  const index = plan.steps.findIndex((step) => step.id === id);
+  const nextIndex = index + direction;
+  if (index < 0 || nextIndex < 0 || nextIndex >= plan.steps.length) return plan;
+  const steps = [...plan.steps];
+  const [step] = steps.splice(index, 1);
+  if (!step) return plan;
+  steps.splice(nextIndex, 0, step);
+  return {
+    ...plan,
+    draftVisible: true,
+    steps
+  };
+}
+
+function approveAllTrainSteps(plan: TrainPlanState): TrainPlanState {
+  return {
+    ...plan,
+    draftVisible: true,
+    steps: plan.steps.map((step) => ({ ...step, approved: Boolean(step.text.trim()) }))
+  };
+}
+
+function trainPlanReadyToRun(plan: TrainPlanState) {
+  const usableSteps = cleanTrainSteps(plan.steps);
+  if (!plan.draftVisible || !plan.objective.trim() || usableSteps.length === 0) return false;
+  if (plan.granular) return usableSteps.some((step) => step.approved);
+  return usableSteps.every((step) => step.approved);
+}
+
+function trainPlanReadinessCopy(plan: TrainPlanState) {
+  if (!plan.objective.trim()) return "Add an objective before running.";
+  if (cleanTrainSteps(plan.steps).length === 0) return "Add at least one step before running.";
+  if (plan.granular) return "Approve at least one step, then Send will execute only the approved steps.";
+  return "Approve every step or switch to step-by-step approval before running.";
+}
+
+function buildTrainModeSubmission(
+  composerText: string,
+  plan: TrainPlanState
+): { ready: false; objective: string } | { ready: true; text: string } {
+  const objective = normalizeTrainObjective(plan.draftVisible ? plan.objective : composerText);
+  if (!trainPlanReadyToRun({ ...plan, objective })) {
+    return { ready: false, objective };
+  }
+  const usableSteps = cleanTrainSteps(plan.steps);
+  const selectedSteps = plan.granular ? usableSteps.filter((step) => step.approved) : usableSteps;
+  return {
+    ready: true,
+    text: formatTrainPlanMessage(objective, plan, selectedSteps)
+  };
+}
+
+function cleanTrainSteps(steps: TrainStep[]) {
+  return steps.filter((step) => step.text.trim().length > 0);
+}
+
+function formatTrainPlanMessage(objective: string, plan: TrainPlanState, selectedSteps: TrainStep[]) {
+  const stepsText = selectedSteps
+    .map((step, index) => String(index + 1) + ". " + step.text.trim())
+    .join("\n");
+  const executionMode = plan.granular
+    ? "Step-by-step: execute only the approved steps now, report progress, and stop for the next approval."
+    : "Full plan: all steps are approved; execute the full plan unless a material risk appears.";
+
+  return [
+    "/train " + objective.trim(),
+    "",
+    "Approved train plan:",
+    stepsText,
+    "",
+    "Execution mode: " + executionMode,
+    "After completion, offer to save the useful pattern as a reusable skill."
+  ].join("\n");
+}
+
+function applyRunModeToMessage(text: string, mode: RunMode) {
+  if (mode === "plan-first") {
+    return [
+      "Plan first before acting. Do not run mutating tools until I approve the proposed plan.",
+      "",
+      text
+    ].join("\n");
+  }
+  if (mode === "train") {
+    return text.startsWith("/train") ? text : "/train " + text;
+  }
+  return text;
+}
+
+function formatCapabilityCount(count: number, available: boolean | undefined) {
+  if (available === false) return "Not bound";
+  return count === 0 ? "None yet" : String(count);
+}
+
+function formatLearningState(learning: LearningResponse) {
+  if (learning.trainMode?.available === false) return "Pending";
+  const pending =
+    Number(learning.memories?.pending ?? 0) +
+    Number(learning.skills?.pending ?? 0);
+  return pending > 0 ? String(pending) + " pending" : "Train ready";
+}
+
+function formatMcpObservabilityState(observability: McpObservabilityResponse) {
+  if (observability.available === false) return "Preview";
+  const calls = Number(observability.totals?.calls ?? 0);
+  const failures = Number(observability.totals?.failures ?? 0);
+  if (calls === 0) return "No calls yet";
+  return failures > 0 ? `${calls} calls / ${failures} failures` : `${calls} calls`;
 }
 
 function formatRelativeTime(value: string) {
@@ -2226,12 +4075,52 @@ function formatExecutionPlane(plane?: RuntimeExecutionPlane) {
   return "Not configured";
 }
 
-function agentMessagesUrl() {
-  const url = new URL(window.location.href);
-  url.pathname = "/agents/personal-chat-agent/default/get-messages";
+function browserDiagnosticsPillState(diagnostics: BrowserDiagnosticsResponse | null) {
+  if (!diagnostics) return undefined;
+  if (diagnostics.ok) return "ready";
+  if (diagnostics.status === "configured") return "ready";
+  if (diagnostics.status === "missing-configuration") return "error";
+  if (diagnostics.status === "api-unavailable" || diagnostics.status === "live-check-failed") return "error";
+  return undefined;
+}
+
+async function getInitialAgentMessages({ url }: { url?: string | null }) {
+  return getAgentMessages(url ?? undefined);
+}
+
+async function getAgentMessages(baseUrl?: string): Promise<UIMessage[]> {
+  const response = await fetch(agentMessagesUrl(baseUrl), { credentials: "include" });
+  if (!response.ok) return [];
+
+  const payload = await response.json().catch(() => null);
+  if (Array.isArray(payload)) return uniqueMessages(payload);
+  if (payload && typeof payload === "object" && Array.isArray((payload as { messages?: unknown }).messages)) {
+    return uniqueMessages((payload as { messages: UIMessage[] }).messages);
+  }
+  return [];
+}
+
+function agentMessagesUrl(baseUrl?: string) {
+  const url = new URL(baseUrl ?? window.location.href);
+  const path = url.pathname.replace(/\/+$/, "");
+  url.pathname = path.endsWith("/chat-history")
+    ? path
+    : path.includes("/agents/")
+      ? path + "/chat-history"
+      : "/agents/personal-chat-agent/default/chat-history";
   url.search = "";
   url.hash = "";
   return url.toString();
+}
+
+function uniqueMessages(messages: UIMessage[]) {
+  const seen = new Map<string, number>();
+  return messages.map((message, index) => {
+    const id = message.id || `${message.role}:${index}`;
+    const count = seen.get(id) ?? 0;
+    seen.set(id, count + 1);
+    return count === 0 ? { ...message, id } : { ...message, id: `${id}:${count}` };
+  });
 }
 
 function titleCase(value: string) {
@@ -2286,6 +4175,32 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(typeof data.error === "string" ? data.error : "Request failed.");
   }
   return data as T;
+}
+
+async function fetchBrowserDiagnostics(init?: RequestInit): Promise<BrowserDiagnosticsResponse> {
+  const response = await fetch("/browser/diagnostics", {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {})
+    }
+  });
+  const data = await response.json().catch(() => ({}));
+  if (data && typeof data === "object" && Array.isArray((data as BrowserDiagnosticsResponse).stages)) {
+    return data as BrowserDiagnosticsResponse;
+  }
+  if (!response.ok) {
+    throw new Error(typeof data.error === "string" ? data.error : "Browser Run diagnostics failed.");
+  }
+  return data as BrowserDiagnosticsResponse;
+}
+
+async function optionalJsonFetch<T>(url: string, init?: RequestInit): Promise<T | null> {
+  try {
+    return await jsonFetch<T>(url, init);
+  } catch {
+    return null;
+  }
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

@@ -3,6 +3,7 @@ export { AgentDO, ChatDO, TerminalDO } from "./durable-objects";
 // @ts-ignore .open-next is generated output and absent during plain typecheck.
 import openNextHandler from "../../.open-next/worker.js";
 import { Effect } from "effect";
+import { consumeDeploymentQueue, type DeploymentQueueBatch } from "../lib/deployment-queue";
 import { runAutomaticDeploymentUpdatesFromEnvEffect } from "../lib/deployment-update";
 import type { D1DatabaseLike } from "../lib/d1";
 import { resolveDeploymentRepository } from "../lib/repositories";
@@ -69,6 +70,13 @@ export default {
         )
       )
     );
+  },
+  async queue(
+    batch: DeploymentQueueBatch,
+    env: Record<string, unknown>,
+    _ctx: WorkerExecutionContext
+  ): Promise<void> {
+    await consumeDeploymentQueue(batch, env);
   }
 };
 

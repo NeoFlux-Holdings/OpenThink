@@ -6,11 +6,13 @@ import {
   KeyRound,
   LockKeyhole,
   Play,
+  RefreshCw,
+  Search,
   ShieldCheck,
   Sparkles,
   WalletCards
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { DeploymentRequest } from "@/lib/deployment-engine";
 import {
   PersonalAgentConfigurator,
@@ -45,20 +47,75 @@ interface PermissionIssue {
   };
 }
 
+interface RegistrarDomainResult {
+  name: string;
+  registrable: boolean;
+  tier?: string;
+  pricing?: {
+    currency?: string;
+    registration_cost?: string;
+    renewal_cost?: string;
+  };
+  reason?: string;
+}
+
+interface RegistrarLookupPayload {
+  search?: { domains?: RegistrarDomainResult[] };
+  check?: { domains?: RegistrarDomainResult[] };
+  purchasePrerequisites?: string[];
+}
+
+interface RegistrarRegisterResponse {
+  accountId?: string;
+  check?: { domains?: RegistrarDomainResult[] };
+  registration?: {
+    domain_name?: string;
+    status?: string;
+    workflow_status?: string;
+    links?: {
+      self?: string;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
+  poll?: {
+    platformPath?: string;
+    cloudflareStatusPath?: string;
+    cloudflare?: string;
+  };
+  message?: string;
+  error?: string;
+}
+
+interface RegistrarStatusResponse {
+  accountId?: string;
+  domain?: string;
+  status?: {
+    state?: string;
+    status?: string;
+    workflow_status?: string;
+    workflowStatus?: string;
+    [key: string]: unknown;
+  };
+  terminal?: boolean;
+  summary?: string;
+  error?: string;
+}
+
 const launchChecks = [
   {
-    label: "Token verifies",
-    value: "We read the account, owner email, and zones after you paste the token.",
+    label: "One scoped token",
+    value: "Cloudflare opens a prefilled token screen; paste it here and verify once.",
     Icon: KeyRound
   },
   {
-    label: "Access protected",
-    value: "The agent is locked to the account email by default.",
+    label: "Private by default",
+    value: "Cloudflare Access is attached before the launch returns a usable URL.",
     Icon: LockKeyhole
   },
   {
-    label: "Kimi default",
-    value: "Kimi K2.6 on Workers AI is selected unless you choose BYOK or another provider.",
+    label: "Agent OS included",
+    value: "Goals, workspace orchestration, Code Mode MCP, sub-agents, and updates are seeded.",
     Icon: Sparkles
   },
   {
@@ -108,8 +165,10 @@ const thinkingOptions = [
   { id: "xhigh", label: "Extra high" }
 ] as const;
 
+const defaultAgentName = "orbit-forge";
+
 export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
-  const [agentName, setAgentName] = useState("My Personal Agent");
+  const [agentName, setAgentName] = useState(defaultAgentName);
   const [cloudflareAccountId, setCloudflareAccountId] = useState("");
   const [accessAllowedEmail, setAccessAllowedEmail] = useState("");
   const [accessAdditionalEmails, setAccessAdditionalEmails] = useState("");
@@ -132,6 +191,22 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
   const [permissionIssue, setPermissionIssue] = useState<PermissionIssue | null>(null);
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
+  const [domainQuery, setDomainQuery] = useState("");
+  const [registrarLookup, setRegistrarLookup] = useState<RegistrarLookupPayload | null>(null);
+  const [registrarError, setRegistrarError] = useState<string | null>(null);
+  const [isCheckingDomain, setIsCheckingDomain] = useState(false);
+  const [registrarPurchaseCandidate, setRegistrarPurchaseCandidate] =
+    useState<RegistrarDomainResult | null>(null);
+  const [registrarConfirmation, setRegistrarConfirmation] = useState("");
+  const [registrarMaxPrice, setRegistrarMaxPrice] = useState("");
+  const [registrarAutoRenew, setRegistrarAutoRenew] = useState(false);
+  const [registrarPurchaseResult, setRegistrarPurchaseResult] =
+    useState<RegistrarRegisterResponse | null>(null);
+  const [registrarPurchaseError, setRegistrarPurchaseError] = useState<string | null>(null);
+  const [isRegisteringDomain, setIsRegisteringDomain] = useState(false);
+  const [registrarStatus, setRegistrarStatus] = useState<RegistrarStatusResponse | null>(null);
+  const [registrarStatusError, setRegistrarStatusError] = useState<string | null>(null);
+  const [isCheckingRegistrationStatus, setIsCheckingRegistrationStatus] = useState(false);
   const tokenUrl = useMemo(
     () =>
       buildOpenThinkTokenUrl({
@@ -155,6 +230,64 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
   const customHostname =
     effectiveHostPrefix && selectedZone?.name ? `${effectiveHostPrefix}.${selectedZone.name}` : "";
 
+  useEffect(() => {
+    if (!registrarPurchaseResult || !registrarPurchaseCandidate || registrarStatus?.terminal) {
+      return;
+    }
+
+    let cancelled = false;
+    const pollStatus = async () => {
+      setIsCheckingRegistrationStatus(true);
+      try {
+        const response = await fetch("/api/deployment/domain-status", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cfApiToken,
+            cloudflareAccountId,
+            domain: registrarPurchaseCandidate.name
+          })
+        });
+        const body = (await response.json().catch(() => null)) as RegistrarStatusResponse | null;
+        if (!response.ok || !body) {
+          throw new Error(body?.error ?? "Domain registration status check failed.");
+        }
+        if (!cancelled) {
+          setRegistrarStatus(body);
+          setRegistrarStatusError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setRegistrarStatusError(
+            error instanceof Error
+              ? error.message
+              : "Domain registration status check failed."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setIsCheckingRegistrationStatus(false);
+        }
+      }
+    };
+
+    void pollStatus();
+    const interval = window.setInterval(() => {
+      if (!cancelled) void pollStatus();
+    }, 7000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [
+    cfApiToken,
+    cloudflareAccountId,
+    registrarPurchaseCandidate,
+    registrarPurchaseResult,
+    registrarStatus?.terminal
+  ]);
+
   async function verifyToken() {
     setVerifyError(null);
     setPermissionIssue(null);
@@ -164,7 +297,11 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
       const response = await fetch("/api/deployment/verify-token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cfApiToken })
+        body: JSON.stringify({
+          cfApiToken,
+          cloudflareAccountId,
+          customDomainZoneId: customDomainEnabled ? customZoneId : undefined
+        })
       });
       const body = (await response.json().catch(() => null)) as
         | { inspection?: TokenInspection; permissionIssue?: PermissionIssue; error?: string }
@@ -184,6 +321,90 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
       setVerifyError(error instanceof Error ? error.message : "Token verification failed.");
     } finally {
       setIsVerifying(false);
+    }
+  }
+
+  async function checkDomainAvailability() {
+    const query = domainQuery.trim();
+    if (!query) return;
+
+    setRegistrarError(null);
+    setRegistrarLookup(null);
+    setRegistrarPurchaseCandidate(null);
+    setRegistrarPurchaseResult(null);
+    setRegistrarPurchaseError(null);
+    setRegistrarStatus(null);
+    setRegistrarStatusError(null);
+    setIsCheckingDomain(true);
+    try {
+      const response = await fetch("/api/deployment/domain-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cfApiToken,
+          cloudflareAccountId,
+          query,
+          domains: query.includes(".") ? [query] : undefined
+        })
+      });
+      const body = (await response.json().catch(() => null)) as
+        | (RegistrarLookupPayload & { error?: string })
+        | null;
+      if (!response.ok || !body) {
+        throw new Error(body?.error ?? "Domain check failed.");
+      }
+      setRegistrarLookup(body);
+    } catch (error) {
+      setRegistrarError(error instanceof Error ? error.message : "Domain check failed.");
+    } finally {
+      setIsCheckingDomain(false);
+    }
+  }
+
+  function prepareDomainRegistration(domain: RegistrarDomainResult) {
+    setRegistrarPurchaseCandidate(domain);
+    setRegistrarConfirmation("");
+    setRegistrarPurchaseResult(null);
+    setRegistrarPurchaseError(null);
+    setRegistrarStatus(null);
+    setRegistrarStatusError(null);
+    setRegistrarAutoRenew(false);
+    setRegistrarMaxPrice(domain.pricing?.registration_cost ?? "");
+  }
+
+  async function registerDomain() {
+    if (!registrarPurchaseCandidate) return;
+
+    setRegistrarPurchaseError(null);
+    setRegistrarPurchaseResult(null);
+    setIsRegisteringDomain(true);
+    try {
+      const response = await fetch("/api/deployment/domain-register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cfApiToken,
+          cloudflareAccountId,
+          domain: registrarPurchaseCandidate.name,
+          confirmation: registrarConfirmation,
+          maxRegistrationCost: registrarMaxPrice,
+          expectedCurrency: registrarPurchaseCandidate.pricing?.currency,
+          autoRenew: registrarAutoRenew
+        })
+      });
+      const body = (await response.json().catch(() => null)) as RegistrarRegisterResponse | null;
+      if (!response.ok || !body) {
+        throw new Error(body?.error ?? "Domain registration failed.");
+      }
+      setRegistrarPurchaseResult(body);
+      setRegistrarStatus(null);
+      setRegistrarStatusError(null);
+    } catch (error) {
+      setRegistrarPurchaseError(
+        error instanceof Error ? error.message : "Domain registration failed."
+      );
+    } finally {
+      setIsRegisteringDomain(false);
     }
   }
 
@@ -241,15 +462,14 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
       </div>
 
       <div className="credential-guidance">
-        <strong>Credential automation</strong>
+        <strong>Start with the minimum required setup</strong>
         <p>
-          Create a scoped token, paste it here, then verify. Verification fills account and Access
-          email defaults before launch.
+          Create a scoped Cloudflare token, paste it here, and verify. The form fills the
+          account, owner email, available zones, and sane defaults after verification.
         </p>
         <p className="credential-warning">
-          Confirm Cloudflare shows <strong>Account - Workers R2 Storage - Edit</strong> and, for
-          custom domains, <strong>Zone - DNS - Edit</strong> plus{" "}
-          <strong>Zone - Workers Routes - Edit</strong>.
+          The token is fingerprinted in platform metadata, never stored raw. The deployed agent
+          receives it only as a Worker secret for Cloudflare MCP/API operations.
         </p>
         <a className="button button-small" href={tokenUrl} target="_blank" rel="noreferrer">
           Create scoped token
@@ -271,19 +491,35 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
 
       <div className="field">
         <label htmlFor="agent-name">Agent name</label>
-        <input
-          id="agent-name"
-          value={agentName}
-          onChange={(event) => {
-            setAgentName(event.target.value);
-            if (!customHostPrefixDirty) {
-              setCustomHostPrefix(sanitizeDomainLabel(event.target.value));
-            }
-          }}
-          required
-        />
+        <div className="inline-control">
+          <input
+            id="agent-name"
+            value={agentName}
+            onChange={(event) => {
+              setAgentName(event.target.value);
+              if (!customHostPrefixDirty) {
+                setCustomHostPrefix(sanitizeDomainLabel(event.target.value));
+              }
+            }}
+            required
+          />
+          <button
+            className="button"
+            type="button"
+            onClick={() => {
+              const nextName = funAgentName();
+              setAgentName(nextName);
+              if (!customHostPrefixDirty) {
+                setCustomHostPrefix(sanitizeDomainLabel(nextName));
+              }
+            }}
+          >
+            <RefreshCw size={14} aria-hidden="true" />
+            New
+          </button>
+        </div>
         <span className="field-hint">
-          This is also used for the Worker name, for example <code>open-think-tomtom-7eazhw</code>.
+          Two short words make the Worker, Access app, and optional subdomain easy to recognize.
         </span>
       </div>
 
@@ -308,7 +544,8 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
           </button>
         </div>
         <span className="field-hint">
-          Used for provisioning and stored as a secret on the user-owned Worker for Cloudflare MCP/API operations.
+          Required for launch. The token needs Workers, D1, R2, Queues, Vectorize, Workers AI,
+          Access, and optional DNS/routes permissions.
         </span>
       </div>
 
@@ -335,6 +572,132 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
           </div>
         </div>
       ) : null}
+
+      <div className="registrar-panel">
+        <div>
+          <strong>Need a new domain?</strong>
+          <p>
+            Check Cloudflare Registrar availability and price before launch. This does not buy the
+            domain; registration is billable and non-refundable once confirmed.
+          </p>
+        </div>
+        <div className="inline-control">
+          <input
+            value={domainQuery}
+            onChange={(event) => setDomainQuery(event.target.value)}
+            placeholder="orbitforge.dev or a project phrase"
+            aria-label="Domain search phrase or exact domain"
+          />
+          <button
+            className="button"
+            type="button"
+            disabled={!cfApiToken || !domainQuery.trim() || isCheckingDomain}
+            onClick={checkDomainAvailability}
+          >
+            <Search size={14} aria-hidden="true" />
+            {isCheckingDomain ? "Checking" : "Check"}
+          </button>
+        </div>
+        <span className="field-hint">
+          Registrar checks need Account Registrar Write plus billing, contact, and registration
+          agreement setup in Cloudflare. Stripe Projects remains the future zero-touch path for new
+          Cloudflare accounts.
+        </span>
+        {registrarError ? <p className="notice">{registrarError}</p> : null}
+        {registrarLookup ? (
+          <RegistrarResults
+            payload={registrarLookup}
+            onRegisterCandidate={prepareDomainRegistration}
+          />
+        ) : null}
+        {registrarPurchaseCandidate ? (
+          <div className="registrar-purchase" aria-label="Domain registration confirmation">
+            <div>
+              <strong>Register {registrarPurchaseCandidate.name}</strong>
+              <p>
+                Cloudflare will charge the account default payment method if registration
+                succeeds. Type <code>REGISTER {registrarPurchaseCandidate.name}</code> and set a
+                maximum price to continue.
+              </p>
+            </div>
+            <div className="form-grid">
+              <div className="field">
+                <label htmlFor="registrar-confirmation">Confirmation phrase</label>
+                <input
+                  id="registrar-confirmation"
+                  value={registrarConfirmation}
+                  onChange={(event) => setRegistrarConfirmation(event.target.value)}
+                  placeholder={`REGISTER ${registrarPurchaseCandidate.name}`}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="registrar-max-price">Maximum registration price</label>
+                <input
+                  id="registrar-max-price"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={registrarMaxPrice}
+                  onChange={(event) => setRegistrarMaxPrice(event.target.value)}
+                  placeholder="10.11"
+                />
+                <span className="field-hint">
+                  Latest quoted price: {formatRegistrarPrice(registrarPurchaseCandidate)}
+                </span>
+              </div>
+            </div>
+            <label className="check-row check-row-compact">
+              <input
+                type="checkbox"
+                checked={registrarAutoRenew}
+                onChange={(event) => setRegistrarAutoRenew(event.target.checked)}
+              />
+              <span>
+                <strong>Enable auto-renew</strong>
+                <small>
+                  Optional. This authorizes future renewal charges through Cloudflare Registrar.
+                </small>
+              </span>
+            </label>
+            <button
+              className="button button-danger"
+              type="button"
+              disabled={
+                isRegisteringDomain ||
+                registrarConfirmation.trim() !== `REGISTER ${registrarPurchaseCandidate.name}` ||
+                !registrarMaxPrice
+              }
+              onClick={registerDomain}
+            >
+              {isRegisteringDomain ? "Registering" : "Register domain"}
+            </button>
+            {registrarPurchaseError ? <p className="notice">{registrarPurchaseError}</p> : null}
+            {registrarPurchaseResult ? (
+              <p className="notice notice-success">
+                {registrarPurchaseResult.message ??
+                  `Registration submitted for ${registrarPurchaseCandidate.name}.`}
+              </p>
+            ) : null}
+            {registrarPurchaseResult ? (
+              <div className="registrar-status" aria-label="Domain registration status">
+                <strong>Registration status</strong>
+                <span>
+                  {registrarStatus?.summary ??
+                    (isCheckingRegistrationStatus
+                      ? "Checking Cloudflare Registrar..."
+                      : "Waiting for Cloudflare Registrar status.")}
+                </span>
+                {registrarStatus?.terminal ? (
+                  <em className="ready">Terminal</em>
+                ) : (
+                  <em>Polling</em>
+                )}
+                {registrarStatusError ? <small>{registrarStatusError}</small> : null}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
 
       {inspection && inspection.accounts.length > 1 ? (
         <div className="field">
@@ -365,8 +728,8 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
           placeholder="Filled from token verification"
         />
         <span className="field-hint">
-          Optional before verification. By default the agent is locked to the email associated with
-          the Cloudflare token.
+          Optional before verification. By default, Access uses the email returned by Cloudflare
+          user details for this token.
         </span>
       </div>
 
@@ -510,7 +873,13 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
             }
           }}
         />
-        <span>Add an optional custom domain or subdomain for this agent.</span>
+        <span>
+          <strong>Attach a custom domain or subdomain</strong>
+          <small>
+            Optional. The default launch uses a protected workers.dev URL; custom domains add DNS
+            and Workers route automation.
+          </small>
+        </span>
       </label>
 
       {customDomainEnabled ? (
@@ -579,6 +948,80 @@ export function SelfDeployFlow({ isDeploying, onDeploy }: SelfDeployFlowProps) {
   );
 }
 
+function RegistrarResults({
+  payload,
+  onRegisterCandidate
+}: {
+  payload: RegistrarLookupPayload;
+  onRegisterCandidate: (domain: RegistrarDomainResult) => void;
+}) {
+  const checked = payload.check?.domains ?? [];
+  const searched = payload.search?.domains ?? [];
+  const domains = dedupeRegistrarDomains([...checked, ...searched]);
+  if (domains.length === 0) {
+    return <p className="field-hint">No supported Registrar results were returned for this search.</p>;
+  }
+
+  return (
+    <div className="registrar-results" aria-label="Cloudflare Registrar availability results">
+      {domains.map((domain) => (
+        <div className="registrar-result" key={domain.name}>
+          <span>
+            <strong>{domain.name}</strong>
+            <small>
+              {domain.registrable
+                ? formatRegistrarPrice(domain)
+                : domain.reason ?? "Not registrable through the Registrar API"}
+            </small>
+          </span>
+          <em className={domain.registrable ? "ready" : "blocked"}>
+            {domain.registrable ? "Available" : "Unavailable"}
+          </em>
+          {domain.registrable ? (
+            <button
+              className="button button-small"
+              type="button"
+              onClick={() => onRegisterCandidate(domain)}
+            >
+              Register
+            </button>
+          ) : null}
+        </div>
+      ))}
+      {payload.purchasePrerequisites?.length ? (
+        <details className="registrar-prerequisites">
+          <summary>Purchase prerequisites</summary>
+          <ul>
+            {payload.purchasePrerequisites.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function dedupeRegistrarDomains(domains: RegistrarDomainResult[]): RegistrarDomainResult[] {
+  const seen = new Set<string>();
+  return domains.filter((domain) => {
+    const key = domain.name.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function formatRegistrarPrice(domain: RegistrarDomainResult): string {
+  const cost = domain.pricing?.registration_cost;
+  const currency = domain.pricing?.currency ?? "USD";
+  const renewal = domain.pricing?.renewal_cost;
+  if (!cost) return "Current price unavailable; confirm again before purchase.";
+  return renewal && renewal !== cost
+    ? `${currency} ${cost} registration, ${renewal} renewal`
+    : `${currency} ${cost} registration`;
+}
+
 function sanitizeDomainLabel(value: string): string {
   return value
     .toLowerCase()
@@ -586,4 +1029,38 @@ function sanitizeDomainLabel(value: string): string {
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 63);
+}
+
+function funAgentName(): string {
+  const first = [
+    "bright",
+    "signal",
+    "orbit",
+    "kindle",
+    "north",
+    "maple",
+    "cinder",
+    "paper",
+    "vector",
+    "pilot",
+    "ember",
+    "cobalt"
+  ];
+  const second = [
+    "forge",
+    "lantern",
+    "harbor",
+    "atlas",
+    "sketch",
+    "relay",
+    "garden",
+    "thread",
+    "compass",
+    "studio",
+    "signal",
+    "runner"
+  ];
+  const left = first[Math.floor(Math.random() * first.length)] ?? "bright";
+  const right = second[Math.floor(Math.random() * second.length)] ?? "forge";
+  return `${left}-${right}`;
 }

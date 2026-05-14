@@ -33,10 +33,10 @@ export const deploymentFlows: Array<{
   },
   {
     id: "stripe",
-    label: "Deploy with Stripe",
-    eyebrow: "Zero touch",
-    summary: "Create billing, account, spend limit, and first agent without a terminal.",
-    operator: "Best for non-technical owners"
+    label: "Stripe Projects",
+    eyebrow: "Managed preview",
+    summary: "Planned managed path for billing, account creation, domain purchase, spend limits, and first agent launch.",
+    operator: "Reserved until the Stripe-to-Cloudflare account flow is connected"
   },
   {
     id: "button",

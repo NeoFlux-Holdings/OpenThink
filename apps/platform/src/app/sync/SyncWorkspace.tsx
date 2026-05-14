@@ -21,7 +21,8 @@ import type {
   DeploymentResetRequest,
   DeploymentResetMode,
   DeploymentUpdateAction,
-  DeploymentUpdateSummary
+  DeploymentUpdateSummary,
+  DeploymentUpdateTarget
 } from "@/lib/deployment-update";
 import {
   PersonalAgentConfigurator,
@@ -82,6 +83,13 @@ export function SyncWorkspace() {
   const [resetPersonalAgentConfig, setResetPersonalAgentConfig] = useState(() =>
     createPersonalAgentConfiguratorState()
   );
+  const [manualTarget, setManualTarget] = useState<DeploymentUpdateTarget>({
+    deploymentId: "",
+    accountId: "",
+    scriptName: "",
+    agentUrl: "",
+    workerUrl: ""
+  });
   const [tokenStatus, setTokenStatus] = useState<TokenStatus>({
     state: "empty",
     message: "Paste a Cloudflare API token to unlock updates for deployed agents."
@@ -126,6 +134,8 @@ export function SyncWorkspace() {
         )
       : null;
   const resetPhrase = selectedDeployment ? `RESET ${selectedDeployment.deploymentId}` : "RESET";
+  const normalizedManualTarget = normalizeManualTargetInput(manualTarget);
+  const canRunDeploymentAction = Boolean(selectedDeployment || normalizedManualTarget);
   const resetReady = Boolean(
     selectedDeployment && resetConfirmation.trim() === resetPhrase && !resetPersonalAgentIssue
   );
@@ -363,8 +373,14 @@ export function SyncWorkspace() {
     autoUpdate?: Partial<AutoSyncConfig>,
     reset?: DeploymentResetRequest
   ) {
-    if (!selectedDeployment) return;
-    if (!selectedDeployment.canUpdateWithoutToken && !updateToken.trim()) {
+    const fallbackTarget = selectedDeployment ? null : normalizedManualTarget;
+    if (!selectedDeployment && !fallbackTarget) {
+      setDeploymentError(
+        "Select a discovered deployment, or enter a manual deployment ID, script name, account ID, and URL."
+      );
+      return;
+    }
+    if (!(selectedDeployment?.canUpdateWithoutToken ?? false) && !updateToken.trim()) {
       setDeploymentError(
         "Paste and verify a Cloudflare API token first. This platform only stores a fingerprint after launch."
       );
@@ -378,9 +394,10 @@ export function SyncWorkspace() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          deploymentId: selectedDeployment.deploymentId,
+          deploymentId: selectedDeployment?.deploymentId ?? fallbackTarget?.deploymentId,
           action,
           ...(updateToken.trim() ? { cfApiToken: updateToken.trim() } : {}),
+          ...(fallbackTarget ? { manualTarget: fallbackTarget } : {}),
           ...(autoUpdate ? { autoUpdate } : {}),
           ...(reset ? { reset } : {})
         })
@@ -394,15 +411,19 @@ export function SyncWorkspace() {
       if (!response.ok || !payload.deployment || !payload.status) {
         throw new Error(payload.error ?? "Deployment update failed.");
       }
+      const nextDeployment = payload.deployment;
       setDeploymentStatus(payload.status);
       if (payload.result) setDeploymentResult(payload.result);
-      setDeploymentUpdates((deployments) =>
-        deployments.map((deployment) =>
-          deployment.deploymentId === payload.deployment?.deploymentId
-            ? payload.deployment
-            : deployment
-        )
-      );
+      setDeploymentUpdates((deployments) => {
+        const existing = deployments.some(
+          (deployment) => deployment.deploymentId === nextDeployment.deploymentId
+        );
+        if (!existing) return [nextDeployment, ...deployments];
+        return deployments.map((deployment) =>
+          deployment.deploymentId === nextDeployment.deploymentId ? nextDeployment : deployment
+        );
+      });
+      setSelectedDeploymentId(payload.deployment.deploymentId);
       if (action === "reset") setResetConfirmation("");
     } catch (caught) {
       setDeploymentError(caught instanceof Error ? caught.message : "Deployment update failed.");
@@ -644,6 +665,80 @@ export function SyncWorkspace() {
               </div>
             ) : null}
             <WarningList warnings={selectedDeployment?.warnings} />
+            {!selectedDeployment ? (
+              <div className="manual-target-panel">
+                <div>
+                  <span className="capability-kicker">Rate-limit fallback</span>
+                  <h3>Use a known Worker target</h3>
+                  <p>
+                    If Cloudflare account discovery is throttled, enter the known deployment target
+                    and update this Worker directly without scanning every script first.
+                  </p>
+                </div>
+                <div className="form-grid">
+                  <div className="field">
+                    <label htmlFor="manual-deployment-id">Deployment ID</label>
+                    <input
+                      id="manual-deployment-id"
+                      value={manualTarget.deploymentId}
+                      placeholder="agent-abc123"
+                      onChange={(event) =>
+                        setManualTarget((current) => ({
+                          ...current,
+                          deploymentId: event.target.value
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="manual-script-name">Worker script</label>
+                    <input
+                      id="manual-script-name"
+                      value={manualTarget.scriptName}
+                      placeholder="open-think-my-agent-abc123"
+                      onChange={(event) =>
+                        setManualTarget((current) => ({
+                          ...current,
+                          scriptName: event.target.value
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="manual-account-id">Cloudflare account ID</label>
+                    <input
+                      id="manual-account-id"
+                      value={manualTarget.accountId}
+                      placeholder="32 character account ID"
+                      onChange={(event) =>
+                        setManualTarget((current) => ({
+                          ...current,
+                          accountId: event.target.value
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="manual-agent-url">Agent URL</label>
+                    <input
+                      id="manual-agent-url"
+                      value={manualTarget.agentUrl}
+                      placeholder="https://open-think-...workers.dev"
+                      onChange={(event) =>
+                        setManualTarget((current) => ({
+                          ...current,
+                          agentUrl: event.target.value,
+                          workerUrl: event.target.value
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+                <p className="field-hint">
+                  This is stored as a local deployment record after the first successful action.
+                </p>
+              </div>
+            ) : null}
             {selectedDeployment?.metadata?.lastError ? (
               <p className="notice">{selectedDeployment.metadata.lastError}</p>
             ) : null}
@@ -827,7 +922,7 @@ export function SyncWorkspace() {
             <button
               className="button"
               type="button"
-              disabled={!selectedDeployment || isDeploymentWorking !== null}
+              disabled={!canRunDeploymentAction || isDeploymentWorking !== null}
               onClick={() => void runDeploymentUpdate("pull")}
             >
               <GitPullRequestArrow size={16} aria-hidden="true" />
@@ -836,7 +931,7 @@ export function SyncWorkspace() {
             <button
               className="button button-primary"
               type="button"
-              disabled={!selectedDeployment || isDeploymentWorking !== null}
+              disabled={!canRunDeploymentAction || isDeploymentWorking !== null}
               onClick={() => void runDeploymentUpdate("deploy")}
             >
               <Rocket size={16} aria-hidden="true" />
@@ -845,7 +940,7 @@ export function SyncWorkspace() {
             <button
               className="button"
               type="button"
-              disabled={!selectedDeployment || isDeploymentWorking !== null}
+              disabled={!canRunDeploymentAction || isDeploymentWorking !== null}
               onClick={() => void runDeploymentUpdate("reconcile")}
             >
               <ListRestart size={16} aria-hidden="true" />
@@ -997,6 +1092,33 @@ function storeUpdateToken(token: string) {
     }
   } catch {
     // Browsers can block localStorage in hardened privacy modes.
+  }
+}
+
+function normalizeManualTargetInput(
+  input: DeploymentUpdateTarget
+): DeploymentUpdateTarget | null {
+  const deploymentId = input.deploymentId.trim();
+  const accountId = input.accountId.trim();
+  const scriptName = input.scriptName.trim();
+  const agentUrl = input.agentUrl.trim();
+  if (!deploymentId || !accountId || !scriptName || !agentUrl) return null;
+  if (!deploymentId.startsWith("agent-")) return null;
+  if (!/^[a-f0-9]{32}$/i.test(accountId)) return null;
+  if (!scriptName.startsWith("open-think-")) return null;
+  try {
+    const parsed = new URL(agentUrl);
+    if (parsed.protocol !== "https:") return null;
+    const normalizedUrl = parsed.toString().replace(/\/$/, "");
+    return {
+      deploymentId,
+      accountId,
+      scriptName,
+      agentUrl: normalizedUrl,
+      workerUrl: input.workerUrl?.trim() || normalizedUrl
+    };
+  } catch {
+    return null;
   }
 }
 

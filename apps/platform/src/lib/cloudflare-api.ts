@@ -1,4 +1,4 @@
-import type { DeploymentRequest, StarterTemplate } from "./deployment-engine";
+import type { DeploymentProgressSink, DeploymentRequest, StarterTemplate } from "./deployment-engine";
 import { renderAgentWorkerModule } from "./agent-worker-template";
 import {
   createGeneratedRuntimePublisher,
@@ -15,6 +15,7 @@ import {
 } from "./personal-agent-options";
 import { readEnvString } from "./platform-env";
 import { platformD1SchemaSql } from "./platform-schema";
+import { openThinkCanonicalRepository } from "./update-source";
 
 export interface CloudflareApiClientOptions {
   accountId: string;
@@ -55,13 +56,23 @@ export interface CloudflareResourcePlan {
     dnsRecordId?: string;
     accessApplicationId?: string;
     accessPolicyId?: string;
+    accessApplications?: Array<{
+      id?: string;
+      domain: string;
+      role: "workers-dev" | "custom-domain";
+      policyId?: string;
+    }>;
     protectedByAccess?: boolean;
   };
   wrangler: Record<string, unknown>;
 }
 
 export interface CloudflareProvisioningAdapter {
-  provision(request: DeploymentRequest, deploymentId: string): Promise<CloudflareResourcePlan>;
+  provision(
+    request: DeploymentRequest,
+    deploymentId: string,
+    progress?: DeploymentProgressSink
+  ): Promise<CloudflareResourcePlan>;
 }
 
 interface CloudflareEnvelope<T> {
@@ -77,6 +88,7 @@ interface CloudflareRequestInit {
   operation?: string;
   requiredPermission?: string;
   authFailureHint?: string;
+  headers?: Record<string, string>;
 }
 
 interface D1DatabaseResult {
@@ -208,6 +220,37 @@ export interface CloudflareTokenInspection {
   defaultAccessEmail?: string;
 }
 
+export interface RegistrarDomainPricing {
+  currency?: string;
+  registration_cost?: string;
+  renewal_cost?: string;
+}
+
+export interface RegistrarDomainResult {
+  name: string;
+  registrable: boolean;
+  tier?: string;
+  pricing?: RegistrarDomainPricing;
+  reason?: string;
+}
+
+export interface RegistrarDomainLookupResult {
+  domains: RegistrarDomainResult[];
+}
+
+export interface RegistrarRegistrationResult {
+  domain_name?: string;
+  status?: string;
+  workflow_status?: string;
+  registration_id?: string;
+  id?: string;
+  links?: {
+    self?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
 export class CloudflareApiError extends Error {
   constructor(
     message: string,
@@ -270,6 +313,20 @@ export class CloudflareApiClient {
 
   async verifyProvisioningPermissions(): Promise<void> {
     await this.request<unknown>(
+      `/accounts/${this.options.accountId}/workers/scripts?per_page=1`,
+      {
+        operation: "Verify Workers Scripts permission",
+        requiredPermission: "Workers Scripts Write"
+      }
+    );
+    await this.request<unknown>(
+      `/accounts/${this.options.accountId}/access/apps?per_page=1`,
+      {
+        operation: "Verify Access Apps permission",
+        requiredPermission: "Access Apps and Policies Write"
+      }
+    );
+    await this.request<unknown>(
       `/accounts/${this.options.accountId}/d1/database`,
       {
         operation: "Verify D1 permission",
@@ -314,6 +371,77 @@ export class CloudflareApiClient {
       operation: "Verify Workers Routes access",
       requiredPermission: "Workers Routes Write"
     });
+  }
+
+  async searchRegistrarDomains(input: {
+    query: string;
+    limit?: number;
+  }): Promise<RegistrarDomainLookupResult> {
+    const query = input.query.trim();
+    const limit = Math.min(Math.max(Math.trunc(input.limit ?? 5), 1), 20);
+    const params = new URLSearchParams({ q: query, limit: String(limit) });
+    const result = await this.request<RegistrarDomainLookupResult>(
+      `/accounts/${this.options.accountId}/registrar/domain-search?${params.toString()}`,
+      {
+        operation: "Search Cloudflare Registrar domains",
+        requiredPermission: "Registrar Write"
+      }
+    );
+    return { domains: Array.isArray(result.domains) ? result.domains : [] };
+  }
+
+  async checkRegistrarDomains(domains: string[]): Promise<RegistrarDomainLookupResult> {
+    const normalizedDomains = domains
+      .map((domain) => domain.trim().toLowerCase())
+      .filter(Boolean)
+      .slice(0, 20);
+    const result = await this.request<RegistrarDomainLookupResult>(
+      `/accounts/${this.options.accountId}/registrar/domain-check`,
+      {
+        method: "POST",
+        body: { domains: normalizedDomains },
+        operation: "Check Cloudflare Registrar domain availability",
+        requiredPermission: "Registrar Write"
+      }
+    );
+    return { domains: Array.isArray(result.domains) ? result.domains : [] };
+  }
+
+  async registerRegistrarDomain(input: {
+    domainName: string;
+    autoRenew?: boolean;
+    preferAsync?: boolean;
+  }): Promise<RegistrarRegistrationResult> {
+    const domainName = input.domainName.trim().toLowerCase();
+    const body: Record<string, unknown> = { domain_name: domainName };
+    if (input.autoRenew !== undefined) {
+      body.auto_renew = input.autoRenew;
+    }
+    const init: CloudflareRequestInit = {
+      method: "POST",
+      body,
+      operation: "Register Cloudflare Registrar domain",
+      requiredPermission: "Registrar Write"
+    };
+    if (input.preferAsync) {
+      init.headers = { Prefer: "respond-async" };
+    }
+
+    return this.request<RegistrarRegistrationResult>(
+      `/accounts/${this.options.accountId}/registrar/registrations`,
+      init
+    );
+  }
+
+  async getRegistrarRegistrationStatus(domainName: string): Promise<RegistrarRegistrationResult> {
+    const normalizedDomain = domainName.trim().toLowerCase();
+    return this.request<RegistrarRegistrationResult>(
+      `/accounts/${this.options.accountId}/registrar/registrations/${encodeURIComponent(normalizedDomain)}/registration-status`,
+      {
+        operation: "Read Cloudflare Registrar registration status",
+        requiredPermission: "Registrar Write"
+      }
+    );
   }
 
   async ensureD1Database(name: string): Promise<D1DatabaseResult> {
@@ -383,7 +511,7 @@ export class CloudflareApiClient {
 
   async ensureVectorizeIndex(
     name: string,
-    dimensions = 1536,
+    dimensions = 768,
     metric: "cosine" | "euclidean" | "dot-product" = "cosine"
   ): Promise<VectorizeIndexResult> {
     const found = await this.tryRequest<VectorizeIndexResult>(
@@ -852,6 +980,34 @@ export class CloudflareApiClient {
     });
   }
 
+  async deleteWorkerRoute(input: {
+    zoneId: string;
+    routeId: string;
+  }): Promise<void> {
+    await this.request<unknown>(
+      `/zones/${input.zoneId}/workers/routes/${input.routeId}`,
+      {
+        method: "DELETE",
+        operation: "Delete Workers route",
+        requiredPermission: "Workers Routes Write"
+      }
+    );
+  }
+
+  async deleteDnsRecord(input: {
+    zoneId: string;
+    dnsRecordId: string;
+  }): Promise<void> {
+    await this.request<unknown>(
+      `/zones/${input.zoneId}/dns_records/${input.dnsRecordId}`,
+      {
+        method: "DELETE",
+        operation: "Delete DNS CNAME record",
+        requiredPermission: "DNS Write"
+      }
+    );
+  }
+
   private async tryRequest<T>(
     path: string,
     init?: CloudflareRequestInit
@@ -874,7 +1030,8 @@ export class CloudflareApiClient {
       method: init.method ?? "GET",
       headers: {
         Authorization: `Bearer ${this.options.apiToken}`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        ...init.headers
       }
     };
 
@@ -1043,10 +1200,19 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
 
   async provision(
     request: DeploymentRequest,
-    deploymentId: string
+    deploymentId: string,
+    progress?: DeploymentProgressSink
   ): Promise<CloudflareResourcePlan> {
     const names = resourceNames(request, deploymentId);
 
+    await progress?.({
+      id: "account-active",
+      stage: "Account",
+      status: "active",
+      progress: 18,
+      label: "Checking Cloudflare token and account access",
+      detail: "Verifying the scoped token, account permissions, and optional custom-domain zone access."
+    });
     await this.client.verifyToken();
     await this.client.verifyAccountAccess();
     await this.client.verifyProvisioningPermissions();
@@ -1054,7 +1220,23 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
     if (customDomain) {
       await this.client.verifyCustomDomainPermissions(customDomain.zoneId);
     }
+    await progress?.({
+      id: "account-complete",
+      stage: "Account",
+      status: "complete",
+      progress: 28,
+      label: "Cloudflare account verified",
+      detail: "Token, account, resource, and Access prerequisites are available."
+    });
 
+    await progress?.({
+      id: "bindings-active",
+      stage: "Bindings",
+      status: "active",
+      progress: 34,
+      label: "Creating Cloudflare bindings",
+      detail: `Creating or reusing D1 ${names.database}, R2 ${names.bucket}, Queue ${names.queue}, and Vectorize ${names.vectorize}.`
+    });
     const [d1Database, r2Bucket, queue, vectorizeIndex] = await Promise.all([
       this.client.ensureD1Database(names.database),
       this.client.ensureR2Bucket(names.bucket),
@@ -1081,11 +1263,42 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
     const queueId = queue.queue_id ?? queue.id;
     if (queueId) queuePlan.id = queueId;
 
+    await progress?.({
+      id: "bindings-complete",
+      stage: "Bindings",
+      status: "complete",
+      progress: 46,
+      label: "Cloudflare bindings ready",
+      detail: `Ready: D1 ${d1Database.name}, R2 ${r2Bucket.name}, Queue ${queuePlan.name}, and Vectorize ${vectorizeIndex.name}.`,
+      resources: [
+        { type: "D1", name: d1Database.name, binding: "DB" },
+        { type: "R2", name: r2Bucket.name, binding: "AGENT_STORAGE" },
+        { type: "Queue", name: queuePlan.name, binding: "TASK_QUEUE" },
+        { type: "Vectorize", name: vectorizeIndex.name, binding: "VECTORIZE" }
+      ]
+    });
+
+    await progress?.({
+      id: "schema-active",
+      stage: "Storage",
+      status: "active",
+      progress: 52,
+      label: "Applying D1 schema",
+      detail: "Installing platform tables and personal-agent setup metadata."
+    });
     await this.client.executeD1Sql(d1Id, platformD1SchemaSql);
     const personalAgentSql = personalAgentSetupSql(request.personalAgent, deploymentId);
     if (personalAgentSql) {
       await this.client.executeD1Sql(d1Id, personalAgentSql);
     }
+    await progress?.({
+      id: "schema-complete",
+      stage: "Storage",
+      status: "complete",
+      progress: 58,
+      label: "D1 schema ready",
+      detail: "Deployment, workspace, memory, and personal-agent metadata tables are prepared."
+    });
 
     const wrangler = generateWranglerPlan(request.starterTemplate, deploymentId, {
       databaseName: d1Database.name,
@@ -1150,7 +1363,23 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
     if (runtimeApiToken) {
       runtimePublishInput.apiToken = runtimeApiToken;
     }
+    await progress?.({
+      id: "runtime-active",
+      stage: "Deploy",
+      status: "active",
+      progress: 66,
+      label: "Uploading generated Worker runtime",
+      detail: "Publishing the Agents SDK runtime, static chat UI assets, Worker bindings, and preserved secrets."
+    });
     const generatedRuntime = await this.runtimePublisher.publish(runtimePublishInput);
+    await progress?.({
+      id: "runtime-complete",
+      stage: "Deploy",
+      status: "complete",
+      progress: 76,
+      label: "Worker runtime uploaded",
+      detail: `Uploaded Worker script ${names.script}.`
+    });
     const personalAgent = normalizePersonalAgentConfig(request.personalAgent);
     const openThinkWorkspace = generatedRuntime.artifact
       ? {
@@ -1178,6 +1407,14 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
         }
       : undefined;
 
+    await progress?.({
+      id: "route-active",
+      stage: "Route",
+      status: "active",
+      progress: 82,
+      label: "Preparing public route",
+      detail: "Enabling workers.dev and optional custom domain route before Cloudflare Access is attached."
+    });
     await this.client.enableWorkerSubdomain(names.script);
     const workersSubdomain = await this.client.getWorkersSubdomain();
     if (!workersSubdomain) {
@@ -1189,7 +1426,8 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
     }
 
     const workersDevUrl = `https://${names.script}.${workersSubdomain}.workers.dev`;
-    const workerHost = customDomain?.hostname ?? new URL(workersDevUrl).hostname;
+    const workersDevHost = new URL(workersDevUrl).hostname;
+    const workerHost = customDomain?.hostname ?? workersDevHost;
     const workerUrl = customDomain ? `https://${customDomain.hostname}` : workersDevUrl;
     let dnsRecord: DnsRecordResult | undefined;
     let workerRoute: WorkerRouteResult | undefined;
@@ -1206,19 +1444,71 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
         scriptName: names.script
       });
     }
+    await progress?.({
+      id: "route-complete",
+      stage: "Route",
+      status: "complete",
+      progress: 88,
+      label: "Route ready for Access protection",
+      detail: customDomain
+        ? `Prepared ${customDomain.hostname} and ${names.script}.${workersSubdomain}.workers.dev.`
+        : `Prepared ${names.script}.${workersSubdomain}.workers.dev.`
+    });
 
     let accessApplication: AccessApplicationResult;
+    let workersDevAccessApplication: AccessApplicationResult | undefined;
+    let customDomainAccessApplication: AccessApplicationResult | undefined;
+    const allowedEmails = accessEmailsForRequest(request);
 
     try {
-      accessApplication = await this.client.createAccessApplication({
-        name: request.agentName?.trim() || names.script,
-        domain: workerHost,
-        allowedEmails: accessEmailsForRequest(request)
+      await progress?.({
+        id: "access-active",
+        stage: "Access",
+        status: "active",
+        progress: 92,
+        label: "Locking the agent behind Cloudflare Access",
+        detail: "Creating Access applications and email allow policies for every reachable hostname."
       });
+      if (customDomain) {
+        customDomainAccessApplication = await this.client.createAccessApplication({
+          name: `${request.agentName?.trim() || names.script} custom domain`,
+          domain: customDomain.hostname,
+          allowedEmails
+        });
+      }
+
+      workersDevAccessApplication = await this.client.createAccessApplication({
+        name: request.agentName?.trim() || names.script,
+        domain: workersDevHost,
+        allowedEmails
+      });
+      accessApplication = customDomainAccessApplication ?? workersDevAccessApplication;
     } catch (error) {
       await this.client.disableWorkerSubdomain(names.script).catch(() => undefined);
+      if (customDomain?.zoneId && workerRoute?.id) {
+        await this.client.deleteWorkerRoute({
+          zoneId: customDomain.zoneId,
+          routeId: workerRoute.id
+        }).catch(() => undefined);
+      }
+      if (customDomain?.zoneId && dnsRecord?.id) {
+        await this.client.deleteDnsRecord({
+          zoneId: customDomain.zoneId,
+          dnsRecordId: dnsRecord.id
+        }).catch(() => undefined);
+      }
       throw error;
     }
+    await progress?.({
+      id: "access-complete",
+      stage: "Access",
+      status: "complete",
+      progress: 96,
+      label: "Cloudflare Access protection ready",
+      detail: customDomain
+        ? "Both custom domain and workers.dev hostnames are protected by Access."
+        : "The workers.dev hostname is protected by Access."
+    });
 
     const workerDeployment: NonNullable<CloudflareResourcePlan["workerDeployment"]> = {
       scriptName: names.script,
@@ -1230,7 +1520,37 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
     if (customDomain) workerDeployment.customHostname = customDomain.hostname;
     if (dnsRecord?.id) workerDeployment.dnsRecordId = dnsRecord.id;
     if (workerRoute?.id) workerDeployment.customRouteId = workerRoute.id;
+    const accessApplications = [
+      ...(workersDevAccessApplication
+        ? [
+            {
+              id: workersDevAccessApplication.id,
+              domain: workersDevHost,
+              role: "workers-dev" as const,
+              policyId: workersDevAccessApplication.policies?.[0]?.id
+            }
+          ]
+        : []),
+      ...(customDomain && customDomainAccessApplication
+        ? [
+            {
+              id: customDomainAccessApplication.id,
+              domain: customDomain.hostname,
+              role: "custom-domain" as const,
+              policyId: customDomainAccessApplication.policies?.[0]?.id
+            }
+          ]
+        : [])
+    ];
     if (accessApplication?.id) workerDeployment.accessApplicationId = accessApplication.id;
+    if (accessApplications.length > 0) {
+      workerDeployment.accessApplications = accessApplications.map((app) => ({
+        ...(app.id ? { id: app.id } : {}),
+        domain: app.domain,
+        role: app.role,
+        ...(app.policyId ? { policyId: app.policyId } : {})
+      }));
+    }
     const accessPolicyId = accessApplication?.policies?.[0]?.id;
     if (accessPolicyId) workerDeployment.accessPolicyId = accessPolicyId;
 
@@ -1248,7 +1568,7 @@ export class CloudflareRestProvisioningAdapter implements CloudflareProvisioning
       },
       vectorizeIndex: {
         name: vectorizeIndex.name,
-        dimensions: 1536,
+        dimensions: 768,
         metric: "cosine"
       },
       queue: queuePlan,
@@ -1578,7 +1898,7 @@ function generateWorkerUploadMetadata(input: {
       {
         type: "plain_text",
         name: "OPEN_THINK_UPDATE_REPOSITORY",
-        text: "NeoFlux-Holdings/OpenThink"
+        text: openThinkCanonicalRepository
       },
       {
         type: "plain_text",

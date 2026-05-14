@@ -19,7 +19,8 @@ export type PersonalAgentFeatureKey = (typeof personalAgentFeatureKeys)[number];
 export const personalAgentToolApprovalPolicies = [
   "auto",
   "ask-every-time",
-  "allow-all"
+  "allow-all",
+  "full-auto"
 ] as const;
 
 export type PersonalAgentToolApprovalPolicy = (typeof personalAgentToolApprovalPolicies)[number];
@@ -470,6 +471,9 @@ export function normalizePersonalAgentToolApprovalPolicy(
   if (isPersonalAgentToolApprovalPolicy(normalized)) return normalized;
   if (normalized === "ask-everytime") return "ask-every-time";
   if (normalized === "allowall") return "allow-all";
+  if (normalized === "fullauto" || normalized === "always-approve" || normalized === "alwaysapprove") {
+    return "full-auto";
+  }
   return defaultPersonalAgentToolApprovalPolicy;
 }
 

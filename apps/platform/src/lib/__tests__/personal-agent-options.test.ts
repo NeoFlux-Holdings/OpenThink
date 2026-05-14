@@ -43,6 +43,7 @@ describe("personal agent options", () => {
   it("normalizes tool approval policy aliases to the default-safe enum", () => {
     expect(normalizePersonalAgentToolApprovalPolicy("ask everytime")).toBe("ask-every-time");
     expect(normalizePersonalAgentToolApprovalPolicy("allow all")).toBe("allow-all");
+    expect(normalizePersonalAgentToolApprovalPolicy("always approve")).toBe("full-auto");
     expect(normalizePersonalAgentToolApprovalPolicy("unknown")).toBe("auto");
   });
 

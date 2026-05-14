@@ -13,6 +13,7 @@
     "lint": "pnpm -r lint"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260511.1",
     "@types/node": "latest",
     "typescript": "latest",
     "vite": "latest",

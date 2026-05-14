@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, CircleDashed } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CircleDashed, Loader2 } from "lucide-react";
 import type { DeploymentEvent } from "@/lib/deployment-engine";
 
 interface DeploymentTimelineProps {
@@ -28,13 +28,19 @@ export function DeploymentTimeline({ events, isDeploying }: DeploymentTimelinePr
   return (
     <div className="timeline" aria-live="polite">
       {events.map((event) => (
-        <div className="timeline-row" data-complete="true" key={event.id}>
+        <div className="timeline-row" data-state={event.status} key={event.id}>
           <span className="timeline-marker">
-            <CheckCircle2 size={15} aria-hidden="true" />
+            {event.status === "error" ? (
+              <AlertTriangle size={15} aria-hidden="true" />
+            ) : event.status === "active" ? (
+              <Loader2 size={15} aria-hidden="true" />
+            ) : (
+              <CheckCircle2 size={15} aria-hidden="true" />
+            )}
           </span>
           <span className="timeline-copy">
             <strong>{event.label}</strong>
-            <small>{event.detail}</small>
+            <small>{event.progress}% - {event.detail}</small>
           </span>
         </div>
       ))}

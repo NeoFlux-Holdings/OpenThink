@@ -230,6 +230,144 @@ describe("CloudflareApiClient", () => {
     });
   });
 
+  it("verifies deploy-critical provisioning permissions before launch", async () => {
+    const calls: string[] = [];
+    const client = new CloudflareApiClient({
+      accountId: "acct",
+      apiToken: "token",
+      fetcher: async (url) => {
+        calls.push(String(url));
+        return json({ result: [] });
+      }
+    });
+
+    await client.verifyProvisioningPermissions();
+
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        "https://api.cloudflare.com/client/v4/accounts/acct/workers/scripts?per_page=1",
+        "https://api.cloudflare.com/client/v4/accounts/acct/access/apps?per_page=1",
+        "https://api.cloudflare.com/client/v4/accounts/acct/d1/database",
+        "https://api.cloudflare.com/client/v4/accounts/acct/r2/buckets",
+        "https://api.cloudflare.com/client/v4/accounts/acct/queues",
+        "https://api.cloudflare.com/client/v4/accounts/acct/vectorize/v2/indexes"
+      ])
+    );
+  });
+
+  it("checks Cloudflare Registrar domain availability through account-scoped endpoints", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = new CloudflareApiClient({
+      accountId: "acct",
+      apiToken: "token",
+      fetcher: async (url, init) => {
+        const call: { url: string; init?: RequestInit } = { url: String(url) };
+        if (init) call.init = init;
+        calls.push(call);
+        if (String(url).includes("/registrar/domain-search")) {
+          return json({
+            result: {
+              domains: [
+                {
+                  name: "orbitforge.dev",
+                  registrable: true,
+                  pricing: { currency: "USD", registration_cost: "10.11" }
+                }
+              ]
+            }
+          });
+        }
+        return json({
+          result: {
+            domains: [
+              {
+                name: "orbitforge.dev",
+                registrable: true,
+                pricing: { currency: "USD", registration_cost: "10.11" }
+              }
+            ]
+          }
+        });
+      }
+    });
+
+    const search = await client.searchRegistrarDomains({ query: "orbit forge", limit: 3 });
+    const check = await client.checkRegistrarDomains(["OrbitForge.dev"]);
+
+    expect(search.domains[0]?.name).toBe("orbitforge.dev");
+    expect(check.domains[0]?.registrable).toBe(true);
+    expect(calls[0]?.url).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/acct/registrar/domain-search?q=orbit+forge&limit=3"
+    );
+    expect(calls[1]?.url).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/acct/registrar/domain-check"
+    );
+    expect(calls[1]?.init?.method).toBe("POST");
+    expect(calls[1]?.init?.body).toBe(JSON.stringify({ domains: ["orbitforge.dev"] }));
+  });
+
+  it("registers a Registrar domain with explicit async preference", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = new CloudflareApiClient({
+      accountId: "acct",
+      apiToken: "token",
+      fetcher: async (url, init) => {
+        const call: { url: string; init?: RequestInit } = { url: String(url) };
+        if (init) call.init = init;
+        calls.push(call);
+        return json({
+          result: {
+            domain_name: "orbitforge.dev",
+            status: "pending",
+            links: { self: "/accounts/acct/registrar/registrations/orbitforge.dev" }
+          }
+        });
+      }
+    });
+
+    const registration = await client.registerRegistrarDomain({
+      domainName: "OrbitForge.dev",
+      autoRenew: false,
+      preferAsync: true
+    });
+
+    expect(registration.domain_name).toBe("orbitforge.dev");
+    expect(calls[0]?.url).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/acct/registrar/registrations"
+    );
+    expect(calls[0]?.init?.method).toBe("POST");
+    expect(calls[0]?.init?.headers).toMatchObject({ Prefer: "respond-async" });
+    expect(calls[0]?.init?.body).toBe(
+      JSON.stringify({ domain_name: "orbitforge.dev", auto_renew: false })
+    );
+  });
+
+  it("reads Registrar registration workflow status", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = new CloudflareApiClient({
+      accountId: "acct",
+      apiToken: "token",
+      fetcher: async (url, init) => {
+        const call: { url: string; init?: RequestInit } = { url: String(url) };
+        if (init) call.init = init;
+        calls.push(call);
+        return json({
+          result: {
+            domain_name: "orbitforge.dev",
+            state: "succeeded"
+          }
+        });
+      }
+    });
+
+    const status = await client.getRegistrarRegistrationStatus("OrbitForge.dev");
+
+    expect(status.state).toBe("succeeded");
+    expect(calls[0]?.url).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/acct/registrar/registrations/orbitforge.dev/registration-status"
+    );
+  });
+
   it("resolves a single visible account from a token", async () => {
     const accountId = await resolveCloudflareAccountIdFromToken({
       apiToken: "token",

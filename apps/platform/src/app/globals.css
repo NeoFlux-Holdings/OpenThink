@@ -547,6 +547,11 @@ button {
   line-height: 1.35;
 }
 
+.check-row-compact {
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
 .credential-guidance {
   border: 1px solid rgba(45, 95, 154, 0.24);
   border-radius: var(--radius-sm);
@@ -1325,6 +1330,148 @@ button {
   overflow-wrap: anywhere;
 }
 
+.registrar-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(223, 111, 33, 0.24);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: rgba(223, 111, 33, 0.07);
+}
+
+.registrar-panel strong {
+  display: block;
+  color: var(--accent-strong);
+  font-size: 0.88rem;
+}
+
+.registrar-panel p {
+  margin: 5px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.registrar-results {
+  display: grid;
+  gap: 8px;
+}
+
+.registrar-result {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--surface);
+}
+
+.registrar-result > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.registrar-result strong,
+.registrar-result small {
+  display: block;
+}
+
+.registrar-result strong {
+  color: var(--ink);
+}
+
+.registrar-result small {
+  margin-top: 3px;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+}
+
+.registrar-result em {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.registrar-result em.ready {
+  border-color: rgba(23, 111, 73, 0.28);
+  color: var(--green);
+  background: rgba(23, 111, 73, 0.08);
+}
+
+.registrar-result em.blocked {
+  border-color: rgba(180, 59, 53, 0.28);
+  color: var(--red);
+  background: rgba(180, 59, 53, 0.08);
+}
+
+.registrar-prerequisites summary {
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.registrar-purchase {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(180, 59, 53, 0.24);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: rgba(180, 59, 53, 0.06);
+}
+
+.registrar-purchase code {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1px 5px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.registrar-status {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--surface);
+}
+
+.registrar-status strong,
+.registrar-status span,
+.registrar-status small {
+  display: block;
+}
+
+.registrar-status span,
+.registrar-status small {
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.registrar-status em {
+  justify-self: start;
+  border: 1px solid rgba(45, 95, 154, 0.26);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--blue);
+  background: rgba(45, 95, 154, 0.08);
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.registrar-status em.ready {
+  border-color: rgba(23, 111, 73, 0.28);
+  color: var(--green);
+  background: rgba(23, 111, 73, 0.08);
+}
+
 .service-row,
 .timeline-row,
 .terminal-row,
@@ -1377,10 +1524,30 @@ button {
   background: var(--surface-strong);
 }
 
-.timeline-row[data-complete="true"] .timeline-marker {
+.timeline-row[data-state="complete"] .timeline-marker {
   border-color: rgba(23, 111, 73, 0.35);
   color: var(--green);
   background: rgba(23, 111, 73, 0.08);
+}
+
+.timeline-row[data-state="active"] .timeline-marker {
+  border-color: rgba(45, 95, 154, 0.36);
+  color: var(--blue);
+  background: rgba(45, 95, 154, 0.08);
+}
+
+.timeline-row[data-state="active"] .timeline-marker svg {
+  animation: spin 1s linear infinite;
+}
+
+.timeline-row[data-state="error"] .timeline-marker {
+  border-color: rgba(180, 59, 53, 0.36);
+  color: var(--red);
+  background: rgba(180, 59, 53, 0.08);
+}
+
+.timeline-row[data-state="pending"] .timeline-marker {
+  color: var(--muted);
 }
 
 .timeline-copy strong {
@@ -1393,6 +1560,12 @@ button {
   margin-top: 4px;
   color: var(--ink-soft);
   line-height: 1.35;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .progress-track {
@@ -1415,6 +1588,12 @@ button {
   padding: 12px;
   color: var(--red);
   background: rgba(180, 59, 53, 0.08);
+}
+
+.notice-success {
+  border-color: rgba(23, 111, 73, 0.28);
+  color: var(--green);
+  background: rgba(23, 111, 73, 0.08);
 }
 
 .success-box {
@@ -1767,6 +1946,27 @@ button {
 .capability-note {
   border-top: 1px solid var(--line);
   padding-top: 10px;
+}
+
+.manual-target-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(45, 95, 154, 0.24);
+  border-radius: var(--radius);
+  padding: 14px;
+  background: rgba(45, 95, 154, 0.055);
+}
+
+.manual-target-panel h3 {
+  margin: 8px 0 4px;
+  font-size: 1rem;
+}
+
+.manual-target-panel p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  line-height: 1.45;
 }
 
 .reset-zone {

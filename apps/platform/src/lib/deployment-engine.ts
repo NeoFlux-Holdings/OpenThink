@@ -66,9 +66,24 @@ export interface DeploymentEvent {
   label: string;
   detail: string;
   timestamp: string;
+  agentUrl?: string;
   resources?: DeploymentResource[];
   automation?: AutomationSnapshot;
 }
+
+export interface DeploymentProgressInput {
+  id: string;
+  stage: string;
+  status?: DeploymentEventStatus;
+  progress: number;
+  label: string;
+  detail: string;
+  agentUrl?: string;
+  resources?: DeploymentResource[];
+  automation?: AutomationSnapshot;
+}
+
+export type DeploymentProgressSink = (event: DeploymentProgressInput) => Promise<void> | void;
 
 export interface DeploymentResource {
   type: "Worker" | "Access" | "D1" | "R2" | "Vectorize" | "Queue" | "Container";
@@ -84,6 +99,29 @@ export interface DeploymentResult {
   resourcePlan: CloudflareResourcePlan;
   automation: AutomationSnapshot;
   sseStream: ReadableStream<Uint8Array>;
+}
+
+export interface DeploymentStreamResult {
+  deploymentId: string;
+  plannedAgentUrl: string;
+  automation: AutomationSnapshot;
+  sseStream: ReadableStream<Uint8Array>;
+  completion: Promise<void>;
+}
+
+export interface DeploymentQueuedResult {
+  deploymentId: string;
+  plannedAgentUrl: string;
+  automation: AutomationSnapshot;
+  sseStream: ReadableStream<Uint8Array>;
+  queueMessage: DeploymentQueueMessage;
+}
+
+export interface DeploymentQueueMessage {
+  version: 1;
+  deploymentId: string;
+  request: DeploymentRequest;
+  enqueuedAt: string;
 }
 
 export interface DeploymentEngineOptions {
@@ -113,6 +151,17 @@ export class DeploymentValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "DeploymentValidationError";
+  }
+}
+
+export class DeploymentProvisioningError extends Error {
+  constructor(
+    message: string,
+    readonly deploymentId: string,
+    readonly cause: unknown
+  ) {
+    super(message);
+    this.name = "DeploymentProvisioningError";
   }
 }
 
@@ -153,55 +202,399 @@ export class DeploymentEngine {
     const automation = automationSnapshotForRequest(resolvedRequest, snapshotOptions);
     assertAutomationEnvironment(automation);
 
-    const provisioner =
-      this.options.provisioner ?? provisioningAdapterFromEnv(resolvedRequest, this.options.env);
-    const resourcePlan = await provisioner.provision(resolvedRequest, deploymentId);
-    const agentUrl = resourcePlan.workerDeployment?.url ?? plannedAgentUrl;
-    const events = buildDeploymentEvents(
-      resolvedRequest,
-      deploymentId,
-      agentUrl,
-      resourcePlan,
-      automation
-    );
     const authorization = {
-      accountId: resourcePlan.accountId,
+      accountId: resolvedRequest.cloudflareAccountId?.trim() || "pending",
       spendLimitUsd: resolvedRequest.spendLimitUsd ?? defaultSpendLimitUsd,
       termsAcceptedAt: new Date().toISOString(),
       tenantKind: resolvedRequest.flow === "partner" ? "partner" as const : "self" as const,
       agentName: resolvedRequest.agentName?.trim() || "Personal Agent"
     };
     const tokenFingerprint = await fingerprintOptionalToken(resolvedRequest.cfApiToken);
+    const events: DeploymentEvent[] = [];
+    const emitProgress = async (input: DeploymentProgressInput): Promise<void> => {
+      const event = deploymentProgressEvent(input);
+      events.push(event);
+      await this.options.repository?.appendEvent(deploymentId, event);
+    };
 
     await this.options.repository?.create({
       id: deploymentId,
       userId: resolvedRequest.userId,
       flow: resolvedRequest.flow,
       starterTemplate: resolvedRequest.starterTemplate,
-      status: "deploying",
-      agentUrl,
-      resourcePlan: resourcePlan as unknown as Record<string, unknown>,
+      status: "provisioning",
+      agentUrl: plannedAgentUrl,
+      resourcePlan: {},
       authorization: tokenFingerprint ? { ...authorization, tokenFingerprint } : authorization
     });
+
+    await emitProgress({
+      id: "validate",
+      stage: "Request",
+      status: "complete",
+      progress: 10,
+      label: `${flowToLabel(resolvedRequest.flow)} request accepted`,
+      detail: `${resolvedRequest.agentName?.trim() || "Personal Agent"} mapped to deployment ${deploymentId}.`,
+      automation
+    });
+
+    const provisioner =
+      this.options.provisioner ?? provisioningAdapterFromEnv(resolvedRequest, this.options.env);
+    let resourcePlan: CloudflareResourcePlan;
+    try {
+      resourcePlan = await provisioner.provision(resolvedRequest, deploymentId, emitProgress);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Cloudflare provisioning failed.";
+      await emitProgress({
+        id: "failed",
+        stage: "Failed",
+        status: "error",
+        progress: 100,
+        label: "Deployment failed",
+        detail: message
+      });
+      await this.options.repository?.updateStatus(deploymentId, "failed", {});
+      throw new DeploymentProvisioningError(message, deploymentId, error);
+    }
+    const agentUrl = resourcePlan.workerDeployment?.url ?? plannedAgentUrl;
+    const summaryEvents = buildDeploymentEvents(
+      resolvedRequest,
+      deploymentId,
+      agentUrl,
+      resourcePlan,
+      automation
+    );
+    for (const event of summaryEvents) {
+      if (events.some((existing) => existing.id === event.id)) continue;
+      events.push(event);
+      await this.options.repository?.appendEvent(deploymentId, event);
+    }
+    await this.options.repository?.updateStatus(
+      deploymentId,
+      "ready",
+      resourcePlan as unknown as Record<string, unknown>,
+      agentUrl
+    );
 
     return {
       deploymentId,
       agentUrl,
-      status: "deploying",
+      status: "ready",
       events,
       resourcePlan,
       automation,
-      sseStream: createSseStream(events, this.options.eventDelayMs, {
-        onEvent: (event) =>
-          this.options.repository?.appendEvent(deploymentId, event) ?? Promise.resolve(),
-        onDone: () =>
-          this.options.repository?.updateStatus(
-            deploymentId,
-            "ready",
-            resourcePlan as unknown as Record<string, unknown>
-          ) ?? Promise.resolve()
-      })
+      sseStream: createSseStream(events, this.options.eventDelayMs)
     };
+  }
+
+  async stream(request: DeploymentRequest): Promise<DeploymentStreamResult> {
+    const resolvedRequest = await this.resolveRequest(request);
+    this.validate(resolvedRequest);
+
+    const deploymentId = createDeploymentId(resolvedRequest);
+    const plannedAgentUrl = `https://${deploymentId}.${this.options.platformHost}`;
+    const automationOptions: { repository?: RepositoryKind } = {};
+    if (this.options.repositoryKind) {
+      automationOptions.repository = this.options.repositoryKind;
+    }
+    const snapshotOptions: {
+      repository?: RepositoryKind;
+      workersAIAvailable?: boolean;
+      env?: Record<string, unknown>;
+    } = { ...automationOptions };
+    if (this.options.workersAIAvailable !== undefined) {
+      snapshotOptions.workersAIAvailable = this.options.workersAIAvailable;
+    }
+    if (this.options.env) {
+      snapshotOptions.env = this.options.env;
+    }
+    const automation = automationSnapshotForRequest(resolvedRequest, snapshotOptions);
+    assertAutomationEnvironment(automation);
+
+    const authorization = {
+      accountId: resolvedRequest.cloudflareAccountId?.trim() || "pending",
+      spendLimitUsd: resolvedRequest.spendLimitUsd ?? defaultSpendLimitUsd,
+      termsAcceptedAt: new Date().toISOString(),
+      tenantKind: resolvedRequest.flow === "partner" ? "partner" as const : "self" as const,
+      agentName: resolvedRequest.agentName?.trim() || "Personal Agent"
+    };
+    const tokenFingerprint = await fingerprintOptionalToken(resolvedRequest.cfApiToken);
+    const live = createLiveSseStream();
+    const events: DeploymentEvent[] = [];
+    const emitProgress = async (input: DeploymentProgressInput): Promise<void> => {
+      const event = deploymentProgressEvent(input);
+      events.push(event);
+      await this.options.repository?.appendEvent(deploymentId, event);
+      live.send(event);
+    };
+
+    await this.options.repository?.create({
+      id: deploymentId,
+      userId: resolvedRequest.userId,
+      flow: resolvedRequest.flow,
+      starterTemplate: resolvedRequest.starterTemplate,
+      status: "provisioning",
+      agentUrl: plannedAgentUrl,
+      resourcePlan: {},
+      authorization: tokenFingerprint ? { ...authorization, tokenFingerprint } : authorization
+    });
+
+    await emitProgress({
+      id: "validate",
+      stage: "Request",
+      status: "complete",
+      progress: 10,
+      label: `${flowToLabel(resolvedRequest.flow)} request accepted`,
+      detail: `${resolvedRequest.agentName?.trim() || "Personal Agent"} mapped to deployment ${deploymentId}.`,
+      automation
+    });
+
+    const provisioner =
+      this.options.provisioner ?? provisioningAdapterFromEnv(resolvedRequest, this.options.env);
+    const completion = (async () => {
+      try {
+        const resourcePlan = await provisioner.provision(resolvedRequest, deploymentId, emitProgress);
+        const agentUrl = resourcePlan.workerDeployment?.url ?? plannedAgentUrl;
+        const summaryEvents = buildDeploymentEvents(
+          resolvedRequest,
+          deploymentId,
+          agentUrl,
+          resourcePlan,
+          automation
+        );
+        for (const event of summaryEvents) {
+          if (events.some((existing) => existing.id === event.id)) continue;
+          events.push(event);
+          await this.options.repository?.appendEvent(deploymentId, event);
+          live.send(event);
+        }
+        await this.options.repository?.updateStatus(
+          deploymentId,
+          "ready",
+          resourcePlan as unknown as Record<string, unknown>,
+          agentUrl
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Cloudflare provisioning failed.";
+        await emitProgress({
+          id: "failed",
+          stage: "Failed",
+          status: "error",
+          progress: 100,
+          label: "Deployment failed",
+          detail: message
+        });
+        await this.options.repository?.updateStatus(deploymentId, "failed", {});
+      } finally {
+        live.close();
+      }
+    })();
+
+    return {
+      deploymentId,
+      plannedAgentUrl,
+      automation,
+      sseStream: live.stream,
+      completion
+    };
+  }
+
+  async prepareQueued(request: DeploymentRequest): Promise<DeploymentQueuedResult> {
+    const resolvedRequest = await this.resolveRequest(request);
+    this.validate(resolvedRequest);
+
+    const deploymentId = createDeploymentId(resolvedRequest);
+    const plannedAgentUrl = `https://${deploymentId}.${this.options.platformHost}`;
+    const automationOptions: { repository?: RepositoryKind } = {};
+    if (this.options.repositoryKind) {
+      automationOptions.repository = this.options.repositoryKind;
+    }
+    const snapshotOptions: {
+      repository?: RepositoryKind;
+      workersAIAvailable?: boolean;
+      env?: Record<string, unknown>;
+    } = { ...automationOptions };
+    if (this.options.workersAIAvailable !== undefined) {
+      snapshotOptions.workersAIAvailable = this.options.workersAIAvailable;
+    }
+    if (this.options.env) {
+      snapshotOptions.env = this.options.env;
+    }
+    const automation = automationSnapshotForRequest(resolvedRequest, snapshotOptions);
+    assertAutomationEnvironment(automation);
+
+    const authorization = {
+      accountId: resolvedRequest.cloudflareAccountId?.trim() || "pending",
+      spendLimitUsd: resolvedRequest.spendLimitUsd ?? defaultSpendLimitUsd,
+      termsAcceptedAt: new Date().toISOString(),
+      tenantKind: resolvedRequest.flow === "partner" ? "partner" as const : "self" as const,
+      agentName: resolvedRequest.agentName?.trim() || "Personal Agent"
+    };
+    const tokenFingerprint = await fingerprintOptionalToken(resolvedRequest.cfApiToken);
+    const events: DeploymentEvent[] = [];
+    const emitProgress = async (input: DeploymentProgressInput): Promise<void> => {
+      const event = deploymentProgressEvent(input);
+      events.push(event);
+      await this.options.repository?.appendEvent(deploymentId, event);
+    };
+
+    await this.options.repository?.create({
+      id: deploymentId,
+      userId: resolvedRequest.userId,
+      flow: resolvedRequest.flow,
+      starterTemplate: resolvedRequest.starterTemplate,
+      status: "provisioning",
+      agentUrl: plannedAgentUrl,
+      resourcePlan: {},
+      authorization: tokenFingerprint ? { ...authorization, tokenFingerprint } : authorization
+    });
+
+    await emitProgress({
+      id: "validate",
+      stage: "Request",
+      status: "complete",
+      progress: 10,
+      label: `${flowToLabel(resolvedRequest.flow)} request accepted`,
+      detail: `${resolvedRequest.agentName?.trim() || "Personal Agent"} mapped to deployment ${deploymentId}.`,
+      automation
+    });
+    await emitProgress({
+      id: "queued",
+      stage: "Queue",
+      status: "active",
+      progress: 14,
+      label: "Deployment queued",
+      detail: "Cloudflare Queue will continue provisioning even if this browser tab closes."
+    });
+
+    return {
+      deploymentId,
+      plannedAgentUrl,
+      automation,
+      sseStream: createSseStream(events, 0),
+      queueMessage: {
+        version: 1,
+        deploymentId,
+        request: resolvedRequest,
+        enqueuedAt: new Date().toISOString()
+      }
+    };
+  }
+
+  async runQueuedDeployment(message: DeploymentQueueMessage): Promise<void> {
+    if (message.version !== 1) {
+      throw new DeploymentValidationError("Unsupported deployment queue message version.");
+    }
+
+    const resolvedRequest = message.request;
+    this.validate(resolvedRequest);
+
+    const deploymentId = message.deploymentId;
+    const plannedAgentUrl = `https://${deploymentId}.${this.options.platformHost}`;
+    const automationOptions: { repository?: RepositoryKind } = {};
+    if (this.options.repositoryKind) {
+      automationOptions.repository = this.options.repositoryKind;
+    }
+    const snapshotOptions: {
+      repository?: RepositoryKind;
+      workersAIAvailable?: boolean;
+      env?: Record<string, unknown>;
+    } = { ...automationOptions };
+    if (this.options.workersAIAvailable !== undefined) {
+      snapshotOptions.workersAIAvailable = this.options.workersAIAvailable;
+    }
+    if (this.options.env) {
+      snapshotOptions.env = this.options.env;
+    }
+    const automation = automationSnapshotForRequest(resolvedRequest, snapshotOptions);
+    assertAutomationEnvironment(automation);
+
+    const existing = await this.options.repository?.get(deploymentId);
+    const knownEvents = await this.options.repository?.listEvents(deploymentId);
+    const events = [...(knownEvents ?? [])];
+    if (!existing) {
+      const authorization = {
+        accountId: resolvedRequest.cloudflareAccountId?.trim() || "pending",
+        spendLimitUsd: resolvedRequest.spendLimitUsd ?? defaultSpendLimitUsd,
+        termsAcceptedAt: new Date().toISOString(),
+        tenantKind: resolvedRequest.flow === "partner" ? "partner" as const : "self" as const,
+        agentName: resolvedRequest.agentName?.trim() || "Personal Agent"
+      };
+      const tokenFingerprint = await fingerprintOptionalToken(resolvedRequest.cfApiToken);
+      await this.options.repository?.create({
+        id: deploymentId,
+        userId: resolvedRequest.userId,
+        flow: resolvedRequest.flow,
+        starterTemplate: resolvedRequest.starterTemplate,
+        status: "provisioning",
+        agentUrl: plannedAgentUrl,
+        resourcePlan: {},
+        authorization: tokenFingerprint ? { ...authorization, tokenFingerprint } : authorization
+      });
+    }
+
+    const emitProgress = async (input: DeploymentProgressInput): Promise<void> => {
+      const event = deploymentProgressEvent(input);
+      const existingIndex = events.findIndex((item) => item.id === event.id);
+      if (existingIndex >= 0) {
+        events[existingIndex] = event;
+      } else {
+        events.push(event);
+      }
+      await this.options.repository?.appendEvent(deploymentId, event);
+    };
+
+    await this.options.repository?.updateStatus(
+      deploymentId,
+      "deploying",
+      existing?.resourcePlan ?? {},
+      existing?.agentUrl ?? plannedAgentUrl
+    );
+    await emitProgress({
+      id: "queue-start",
+      stage: "Queue",
+      status: "complete",
+      progress: 16,
+      label: "Deployment worker started",
+      detail: "The queued deployment job is now running on the platform Worker."
+    });
+
+    const provisioner =
+      this.options.provisioner ?? provisioningAdapterFromEnv(resolvedRequest, this.options.env);
+    try {
+      const resourcePlan = await provisioner.provision(resolvedRequest, deploymentId, emitProgress);
+      const agentUrl = resourcePlan.workerDeployment?.url ?? plannedAgentUrl;
+      const summaryEvents = buildDeploymentEvents(
+        resolvedRequest,
+        deploymentId,
+        agentUrl,
+        resourcePlan,
+        automation
+      );
+      for (const event of summaryEvents) {
+        if (events.some((existingEvent) => existingEvent.id === event.id)) continue;
+        events.push(event);
+        await this.options.repository?.appendEvent(deploymentId, event);
+      }
+      await this.options.repository?.updateStatus(
+        deploymentId,
+        "ready",
+        resourcePlan as unknown as Record<string, unknown>,
+        agentUrl
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Cloudflare provisioning failed.";
+      await emitProgress({
+        id: "failed",
+        stage: "Failed",
+        status: "error",
+        progress: 100,
+        label: "Deployment failed",
+        detail: message
+      });
+      await this.options.repository?.updateStatus(deploymentId, "failed", {});
+      throw new DeploymentProvisioningError(message, deploymentId, error);
+    }
   }
 
   private async resolveRequest(request: DeploymentRequest): Promise<DeploymentRequest> {
@@ -394,6 +787,21 @@ function createDeploymentId(request: DeploymentRequest): string {
   return `agent-${Math.abs(hash).toString(36).slice(0, 8)}`;
 }
 
+function deploymentProgressEvent(input: DeploymentProgressInput): DeploymentEvent {
+  return {
+    id: input.id,
+    stage: input.stage,
+    status: input.status ?? "active",
+    progress: input.progress,
+    label: input.label,
+    detail: input.detail,
+    timestamp: new Date().toISOString(),
+    ...(input.agentUrl ? { agentUrl: input.agentUrl } : {}),
+    ...(input.resources ? { resources: input.resources } : {}),
+    ...(input.automation ? { automation: input.automation } : {})
+  };
+}
+
 function buildDeploymentEvents(
   request: DeploymentRequest,
   deploymentId: string,
@@ -452,7 +860,8 @@ function buildDeploymentEvents(
       progress: 100,
       label: "Agent control plane online",
       detail: `Agent URL: ${agentUrl}`,
-      timestamp: new Date(now.getTime() + 4000).toISOString()
+      timestamp: new Date(now.getTime() + 4000).toISOString(),
+      agentUrl
     }
   ];
 }
@@ -550,6 +959,49 @@ function createSseStream(
       if (timer) clearTimeout(timer);
     }
   });
+}
+
+function createLiveSseStream(): {
+  stream: ReadableStream<Uint8Array>;
+  send: (event: DeploymentEvent) => void;
+  close: () => void;
+} {
+  const encoder = new TextEncoder();
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  let closed = false;
+  const backlog: DeploymentEvent[] = [];
+
+  function write(event: DeploymentEvent) {
+    if (closed) return;
+    if (!controller) {
+      backlog.push(event);
+      return;
+    }
+    controller.enqueue(
+      encoder.encode(`event: deployment\ndata: ${JSON.stringify(event)}\n\n`)
+    );
+  }
+
+  return {
+    stream: new ReadableStream<Uint8Array>({
+      start(startController) {
+        controller = startController;
+        for (const event of backlog.splice(0)) {
+          write(event);
+        }
+      },
+      cancel() {
+        closed = true;
+      }
+    }),
+    send: write,
+    close() {
+      if (closed) return;
+      closed = true;
+      controller?.enqueue(encoder.encode('event: done\ndata: {"ok":true}\n\n'));
+      controller?.close();
+    }
+  };
 }
 
 function flowToLabel(flow: DeploymentFlow): string {

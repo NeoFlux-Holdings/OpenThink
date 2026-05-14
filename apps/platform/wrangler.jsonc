@@ -66,6 +66,13 @@
         "binding": "DEPLOYMENT_QUEUE",
         "queue": "open-think-deployments"
       }
+    ],
+    "consumers": [
+      {
+        "queue": "open-think-deployments",
+        "max_batch_size": 1,
+        "max_retries": 3
+      }
     ]
   },
   "services": [

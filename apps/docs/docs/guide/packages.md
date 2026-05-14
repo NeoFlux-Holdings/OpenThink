@@ -2,7 +2,7 @@
 
 Package boundaries keep the runtime swappable:
 
-- `core`: base agent, runtime interfaces, hosted Cloud Agent client SDK, flow descriptors, and profile/customization types.
+- `core`: base agent, runtime interfaces, hosted Cloud Agent client SDK, flow descriptors, and profile/customization types. The package exposes an npm-ready `exports` map and README for external integrations.
 - `state`: Durable Object state and SQLite-shaped repositories.
 - `llm`: Workers AI and AI Gateway adapters.
 - `memory`: conversation memory extraction.

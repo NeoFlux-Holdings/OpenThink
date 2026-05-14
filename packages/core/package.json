@@ -1,11 +1,42 @@
 {
   "name": "@open-think/core",
   "version": "0.3.0",
+  "description": "Typed SDK and runtime contracts for hosted OpenThink Cloud Agent instances.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NeoFlux-Holdings/OpenThink.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/NeoFlux-Holdings/OpenThink/issues"
+  },
+  "homepage": "https://github.com/NeoFlux-Holdings/OpenThink/tree/main/packages/core#readme",
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "mcp",
+    "personal-agent",
+    "openthink"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "lint": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit"

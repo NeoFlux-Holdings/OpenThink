@@ -410,7 +410,7 @@ function toolApprovalPolicyCopy(
     case "auto":
       return {
         label: "Auto",
-        summary: "Ask before writes, deletes, deploys, billing, secrets, or unknown Cloudflare operations."
+        summary: "Run read/status work and goal-scoped low-risk operations; ask for destructive, spend, secret, or identity changes."
       };
     case "ask-every-time":
       return {
@@ -420,7 +420,12 @@ function toolApprovalPolicyCopy(
     case "allow-all":
       return {
         label: "Allow all",
-        summary: "Run MCP tools without approval prompts. Use only with tightly scoped tokens."
+        summary: "Run MCP tools and built-in approval checkpoints without prompts. Legacy alias for Full auto."
+      };
+    case "full-auto":
+      return {
+        label: "Full auto",
+        summary: "Always approve tool calls for this agent. Use only with scoped tokens, spend limits, and trusted goals."
       };
   }
 }

@@ -78,6 +78,14 @@ export const openThinkTokenPermissions: CloudflareTokenPermissionPreset[] = [
       "If Cloudflare does not preselect this, manually add Account > AI Gateway > Edit."
   },
   {
+    key: "browser_rendering",
+    type: "edit",
+    label: "Browser Rendering Edit",
+    reason: "Let the agent capture Browser Run snapshots and open live Browser Run sessions for visual inspection.",
+    manualVerification:
+      "If Cloudflare does not preselect this, manually add Account > Browser Rendering > Edit."
+  },
+  {
     key: "cloudflare_pages",
     type: "edit",
     label: "Cloudflare Pages Edit",
@@ -92,6 +100,14 @@ export const openThinkTokenPermissions: CloudflareTokenPermissionPreset[] = [
     reason: "Let the agent provision KV namespaces when a new app needs low-latency key-value state.",
     manualVerification:
       "If Cloudflare does not preselect this, manually add Account > Workers KV Storage > Edit."
+  },
+  {
+    key: "registrar",
+    type: "edit",
+    label: "Registrar Edit",
+    reason: "Check and register supported domains through the guarded Cloudflare Registrar flow.",
+    manualVerification:
+      "If Cloudflare does not preselect this, manually add Account > Registrar > Edit or Write."
   },
   {
     key: "access",

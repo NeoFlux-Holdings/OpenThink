@@ -8,6 +8,8 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const payload = (await request.json().catch(() => ({}))) as {
       cfApiToken?: string;
+      cloudflareAccountId?: string;
+      customDomainZoneId?: string;
     };
     const token = payload.cfApiToken?.trim();
     if (!token) {
@@ -15,7 +17,7 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     const inspection = await inspectCloudflareToken({ apiToken: token });
-    const accountId = inspection.defaultAccountId;
+    const accountId = payload.cloudflareAccountId?.trim() || inspection.defaultAccountId;
     let permissionIssue:
       | {
           error: string;
@@ -35,6 +37,9 @@ export async function POST(request: Request): Promise<Response> {
         });
         await client.verifyAccountAccess();
         await client.verifyProvisioningPermissions();
+        if (payload.customDomainZoneId?.trim()) {
+          await client.verifyCustomDomainPermissions(payload.customDomainZoneId.trim());
+        }
       } catch (error) {
         const cloudflare =
           error instanceof CloudflareApiError

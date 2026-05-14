@@ -59,6 +59,13 @@ config.queues = {
       binding: "DEPLOYMENT_QUEUE",
       queue: queue.queue_name ?? queue.name ?? resourceNames.queue
     }
+  ],
+  consumers: [
+    {
+      queue: queue.queue_name ?? queue.name ?? resourceNames.queue,
+      max_batch_size: 1,
+      max_retries: 3
+    }
   ]
 };
 
@@ -121,7 +128,7 @@ async function ensureVectorize(name) {
       name,
       description: "open-think platform semantic memory",
       config: {
-        dimensions: 1536,
+        dimensions: 768,
         metric: "cosine"
       }
     }

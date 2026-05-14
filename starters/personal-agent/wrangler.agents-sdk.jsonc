@@ -1,22 +1,38 @@
 {
   "name": "open-think-personal-agent-sdk",
   "main": "src/agents-sdk.ts",
-  "compatibility_date": "2026-05-01",
+  "compatibility_date": "2026-05-14",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": "dist/client",
     "binding": "ASSETS"
   },
   "ai": { "binding": "AI" },
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile"
+    }
+  ],
   "durable_objects": {
     "bindings": [
-      { "name": "PersonalChatAgent", "class_name": "PersonalChatAgent" }
+      { "name": "PersonalChatAgent", "class_name": "PersonalChatAgent" },
+      { "name": "WORKSPACE_MCP", "class_name": "OpenThinkWorkspaceMcp" },
+      { "name": "Sandbox", "class_name": "Sandbox" }
     ]
   },
   "migrations": [
     {
       "tag": "agents-sdk-v1",
       "new_sqlite_classes": ["PersonalChatAgent"]
+    },
+    {
+      "tag": "sandbox-v1",
+      "new_sqlite_classes": ["Sandbox"]
+    },
+    {
+      "tag": "workspace-mcp-v1",
+      "new_sqlite_classes": ["OpenThinkWorkspaceMcp"]
     }
   ],
   "r2_buckets": [
@@ -49,7 +65,11 @@
   "vars": {
     "OPEN_THINK_STARTER": "personal-agent",
     "OPEN_THINK_AGENT_NAME": "Personal Agent",
-    "OPEN_THINK_DEFAULT_MODEL": "@cf/moonshotai/kimi-k2.5",
-    "OPEN_THINK_TOOL_APPROVAL_POLICY": "auto"
+    "OPEN_THINK_DEFAULT_MODEL": "@cf/moonshotai/kimi-k2.6",
+    "OPEN_THINK_TOOL_APPROVAL_POLICY": "auto",
+    "OPEN_THINK_CLOUDFLARE_MCP_CODE_MODE": "enabled",
+    "OPEN_THINK_SANDBOX_STATUS": "enabled",
+    "OPEN_THINK_CONTAINER_STATUS": "enabled",
+    "SANDBOX_TRANSPORT": "rpc"
   }
 }

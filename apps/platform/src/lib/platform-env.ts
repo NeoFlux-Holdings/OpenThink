@@ -13,6 +13,10 @@ export interface AssetBindingLike {
   fetch(request: Request): Promise<Response>;
 }
 
+export interface QueueBindingLike<T = unknown> {
+  send(message: T): Promise<void>;
+}
+
 export interface PlatformRuntimeEnv extends Record<string, unknown> {
   AI?: WorkersAIBinding;
   DB?: D1DatabaseLike;
@@ -20,6 +24,7 @@ export interface PlatformRuntimeEnv extends Record<string, unknown> {
   TERMINAL_DO?: DurableObjectNamespaceLike;
   AGENT_DO?: DurableObjectNamespaceLike;
   ASSETS?: AssetBindingLike;
+  DEPLOYMENT_QUEUE?: QueueBindingLike;
 }
 
 export function getPlatformRuntimeEnv(): PlatformRuntimeEnv {

@@ -11,11 +11,13 @@ import {
   runDeploymentUpdate,
   summarizeDeploymentUpdate,
   type DeploymentResetRequest,
+  type DeploymentUpdateTarget,
   type DeploymentUpdateAction
 } from "@/lib/deployment-update";
 import type { DeploymentRecord, DeploymentRepository } from "@/lib/d1";
 import { getPlatformRuntimeEnv } from "@/lib/platform-env";
 import { resolveDeploymentRepository } from "@/lib/repositories";
+import { fingerprintToken } from "@/lib/security";
 
 const updateActions = new Set<DeploymentUpdateAction>([
   "status",
@@ -71,6 +73,7 @@ export async function POST(request: Request): Promise<Response> {
       deploymentId?: string;
       action?: DeploymentUpdateAction;
       cfApiToken?: string;
+      manualTarget?: Partial<DeploymentUpdateTarget>;
       autoUpdate?: Partial<AutoSyncConfig>;
       reset?: DeploymentResetRequest;
     };
@@ -87,6 +90,15 @@ export async function POST(request: Request): Promise<Response> {
     const env = getPlatformRuntimeEnv();
     const repository = resolveDeploymentRepository(env.DB ? { DB: env.DB } : {}, env);
     let deployment = await repository.repository.get(payload.deploymentId.trim());
+
+    if (!deployment && payload.cfApiToken?.trim() && payload.manualTarget) {
+      deployment = await reattachManualDeploymentTarget({
+        apiToken: payload.cfApiToken,
+        user,
+        repository: repository.repository,
+        target: payload.manualTarget
+      });
+    }
 
     if (!deployment && payload.cfApiToken?.trim()) {
       const discovered = await reattachCloudflareDeployments({
@@ -206,6 +218,116 @@ async function reattachCloudflareDeployments(input: {
   }
 
   return reattached;
+}
+
+async function reattachManualDeploymentTarget(input: {
+  apiToken: string;
+  user: AuthenticatedUser;
+  repository: DeploymentRepository;
+  target: Partial<DeploymentUpdateTarget>;
+}): Promise<DeploymentRecord> {
+  const target = normalizeManualTarget(input.target);
+  const now = new Date().toISOString();
+  const tokenFingerprint = await fingerprintToken(input.apiToken);
+  const record: DeploymentRecord = {
+    id: target.deploymentId,
+    userId: input.user.id,
+    flow: "self",
+    starterTemplate: "personal-agent",
+    status: "ready",
+    agentUrl: target.agentUrl,
+    resourcePlan: {
+      workerDeployment: {
+        scriptName: target.scriptName,
+        url: target.agentUrl,
+        workersDevUrl: target.workerUrl ?? target.agentUrl,
+        protectedByAccess: true,
+        recoveredFromManualTarget: true
+      },
+      generatedRuntime: {
+        mode: "agents-sdk-local-build",
+        scriptName: target.scriptName
+      },
+      openThinkRuntime: {
+        defaultModel: "@cf/moonshotai/kimi-k2.6",
+        modelProvider: "workers-ai",
+        thinkingLevel: "medium"
+      },
+      openThinkUpdate: {
+        target,
+        autoUpdate: {
+          enabled: false,
+          direction: "bidirectional",
+          intervalSeconds: 300
+        },
+        lastAction: "status",
+        lastMessage: "Recovered from a manually supplied update target.",
+        updatedAt: now
+      }
+    },
+    authorization: {
+      accountId: target.accountId,
+      tokenFingerprint,
+      spendLimitUsd: 100,
+      termsAcceptedAt: now,
+      tenantKind: "self",
+      agentName: target.deploymentId
+    },
+    createdAt: now,
+    updatedAt: now
+  };
+
+  const recoveredInput: Parameters<DeploymentRepository["create"]>[0] = {
+    id: record.id,
+    userId: record.userId,
+    flow: record.flow,
+    starterTemplate: record.starterTemplate,
+    status: record.status,
+    agentUrl: record.agentUrl,
+    resourcePlan: record.resourcePlan
+  };
+  if (record.authorization) recoveredInput.authorization = record.authorization;
+  await input.repository.create(recoveredInput);
+
+  return record;
+}
+
+function normalizeManualTarget(input: Partial<DeploymentUpdateTarget>): DeploymentUpdateTarget {
+  const deploymentId = input.deploymentId?.trim();
+  const accountId = input.accountId?.trim();
+  const scriptName = input.scriptName?.trim();
+  const agentUrl = input.agentUrl?.trim();
+
+  if (!deploymentId || !deploymentId.startsWith("agent-")) {
+    throw new DeploymentUpdateError("Manual target needs an OpenThink deployment ID like agent-xxxx.", 400);
+  }
+  if (!accountId || !/^[a-f0-9]{32}$/i.test(accountId)) {
+    throw new DeploymentUpdateError("Manual target needs a 32-character Cloudflare account ID.", 400);
+  }
+  if (!scriptName || !scriptName.startsWith("open-think-")) {
+    throw new DeploymentUpdateError("Manual target script name must start with open-think-.", 400);
+  }
+  if (!agentUrl) {
+    throw new DeploymentUpdateError("Manual target needs the deployed agent URL.", 400);
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(agentUrl);
+  } catch {
+    throw new DeploymentUpdateError("Manual target agent URL is not a valid URL.", 400);
+  }
+  if (parsedUrl.protocol !== "https:") {
+    throw new DeploymentUpdateError("Manual target agent URL must use https.", 400);
+  }
+
+  return {
+    deploymentId,
+    accountId,
+    scriptName,
+    agentUrl: parsedUrl.toString().replace(/\/$/, ""),
+    workerUrl: input.workerUrl?.trim() || parsedUrl.toString().replace(/\/$/, "")
+  };
 }
 
 function mergeDeploymentRecords(

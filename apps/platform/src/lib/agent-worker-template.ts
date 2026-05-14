@@ -56,13 +56,16 @@ const scriptName = ${scriptName};
 const defaultModel = ${defaultModel};
 const modelProvider = ${modelProvider};
 const thinkingLevel = ${thinkingLevel};
+const defaultUpdateRepository = "NeoFlux-Holdings/OpenThink";
 const generatedPersonalAgentConfig = ${personalAgentConfigLiteral};
 const generatedCloudAgentInstance = ${cloudAgentInstanceLiteral};
 const generatedCloudAgentGoalInstruction = ${cloudAgentGoalInstructionLiteral};
 const appHtml = ${appHtml};
-const runtimeAwarenessVersion = "2026-05-04.2";
-const capabilities = ["chat", "coding", "messaging", "goals", "files", "memory", "tasks", "terminal", "mcp", "cloudflare-api", "self-update", "binding-management", "cloudflare-sandbox-planning", "cloudflare-container-planning", "cloudflare-app-deployment-planning"];
-const endpoints = ["/", "/health", "/manifest", "/cloud-agent/profile", "/skills", "/goal", "/subagents", "/subagents/{id}/messages", "/subagents/{id}/control", "/subagents/{id}/summary", "/chat", "/chat?stream=1", "/projects", "/threads", "/messages", "/memory", "/personal-agent/setup", "/files", "/tasks", "/terminal", "/secrets", "/updates/status", "/updates/remote", "/updates/apply", "/updates/bindings", "/runtime/context", "/cloudflare/status", "/cloudflare/api", "/mcp/cloudflare", "/mcp/servers", "/mcp/tools", "/mcp/call"];
+const runtimeAwarenessVersion = "2026-05-14.1";
+const cloudflareMcpBaseUrl = "https://mcp.cloudflare.com/mcp";
+const cloudflareCodeModeMcpServerUrl = "https://mcp.cloudflare.com/mcp?codemode=search_and_execute";
+const capabilities = ["chat", "coding", "messaging", "goals", "workspace", "workspace-orchestrator", "files", "memory", "tasks", "terminal", "mcp", "mcp-code-mode", "cloudflare-api", "self-update", "binding-management", "cloudflare-sandbox-planning", "cloudflare-container-planning", "cloudflare-app-deployment-planning"];
+const endpoints = ["/", "/health", "/manifest", "/cloud-agent/profile", "/workspace", "/skills", "/goal", "/subagents", "/subagents/{id}/messages", "/subagents/{id}/control", "/subagents/{id}/summary", "/chat", "/chat?stream=1", "/projects", "/threads", "/messages", "/memory", "/personal-agent/setup", "/files", "/artifacts", "/browser/snapshot", "/browser/diagnostics", "/browser/sessions", "/browser/sessions/{sessionId}", "/browser/sessions/{sessionId}/targets", "/browser/sessions/{sessionId}/targets/{targetId}", "/contributions", "/tasks", "/terminal", "/secrets", "/updates/status", "/updates/remote", "/updates/apply", "/updates/bindings", "/runtime/context", "/cloudflare/status", "/cloudflare/api", "/mcp/cloudflare", "/mcp/servers", "/mcp/state", "/mcp/add", "/mcp/tools", "/mcp/call", "/mcp/observability"];
 
 export default {
   async fetch(request, env) {
@@ -90,9 +93,11 @@ export default {
         runtimeAwarenessVersion,
         capabilities,
         slashCommands: {
-          goal: goalCommandPayload("", env)
+          goal: goalCommandPayload("", env),
+          train: trainCommandPayload("")
         },
         subAgents: subAgentCapabilityState(env),
+        workspace: await workspaceRuntimeState(env),
         chat: {
           defaultTransport: "server-sent-events",
           streamEndpoint: "/chat?stream=1",
@@ -122,9 +127,11 @@ export default {
         capabilities,
         endpoints,
         slashCommands: {
-          goal: goalCommandPayload("", env)
+          goal: goalCommandPayload("", env),
+          train: trainCommandPayload("")
         },
         subAgents: subAgentCapabilityState(env),
+        workspace: await workspaceRuntimeState(env),
         chat: {
           transports: ["server-sent-events", "json"],
           streamEndpoint: "/chat?stream=1",
@@ -134,7 +141,8 @@ export default {
         skills: cloudflarePlatformSkills(env),
         mcp: {
           cloudflareApi: {
-            serverUrl: "https://mcp.cloudflare.com/mcp",
+            serverUrl: cloudflareApiMcpServerUrl(env),
+            codeMode: codeModeEnabled(env),
             auth: env.OPEN_THINK_CF_API_TOKEN ? "runtime-secret-bridge" : "oauth-recommended",
             tools: ["search", "execute"]
           },
@@ -144,8 +152,11 @@ export default {
           },
           advancedClient: {
             registry: "/mcp/servers",
+            state: "/mcp/state",
+            add: "/mcp/add",
             tools: "/mcp/tools",
             call: "/mcp/call",
+            observability: "/mcp/observability",
             transport: "streamable-http-json-rpc"
           }
         }
@@ -154,6 +165,10 @@ export default {
 
     if (url.pathname === "/cloud-agent/profile") {
       return Response.json(cloudAgentInstanceState(env));
+    }
+
+    if (url.pathname === "/workspace" && (request.method === "GET" || request.method === "POST")) {
+      return handleWorkspaceRequest(request, env);
     }
 
     if (url.pathname === "/skills") {
@@ -251,6 +266,27 @@ export default {
       });
     }
 
+    if (url.pathname === "/artifacts") {
+      return handleArtifactsRequest(request, env);
+    }
+
+    if (url.pathname === "/browser/snapshot") {
+      return handleBrowserSnapshotRequest(request, env);
+    }
+
+    if (url.pathname === "/browser/diagnostics") {
+      return handleBrowserDiagnosticsRequest(request, env);
+    }
+
+    const browserSessionRoute = parseBrowserSessionRoute(url.pathname);
+    if (browserSessionRoute) {
+      return handleBrowserSessionsRequest(request, env, browserSessionRoute);
+    }
+
+    if (url.pathname === "/contributions") {
+      return handleContributionRequest(request, env);
+    }
+
     if (url.pathname === "/tasks" && request.method === "POST") {
       const payload = await request.json().catch(() => ({}));
       if (!env.TASK_QUEUE) return Response.json({ error: "Queue binding is not configured." }, { status: 503 });
@@ -312,7 +348,8 @@ export default {
       const status = {
         accountId,
         apiTokenAvailable: Boolean(env.OPEN_THINK_CF_API_TOKEN),
-        mcpServerUrl: "https://mcp.cloudflare.com/mcp",
+        mcpServerUrl: cloudflareApiMcpServerUrl(env),
+        codeMode: codeModeEnabled(env),
         docsMcpServerUrl: "https://docs.mcp.cloudflare.com/mcp",
         mode: env.OPEN_THINK_CF_API_TOKEN ? "runtime-secret" : "oauth-or-user-token-required"
       };
@@ -331,7 +368,8 @@ export default {
 
     if (url.pathname === "/mcp/cloudflare") {
       return Response.json({
-        serverUrl: "https://mcp.cloudflare.com/mcp",
+        serverUrl: cloudflareApiMcpServerUrl(env),
+        codeMode: codeModeEnabled(env),
         docsServerUrl: "https://docs.mcp.cloudflare.com/mcp",
         mode: env.OPEN_THINK_CF_API_TOKEN ? "runtime-secret-bridge" : "oauth-required-for-official-remote",
         authorization: env.OPEN_THINK_CF_API_TOKEN ? "OPEN_THINK_CF_API_TOKEN is available as a Worker secret." : "Connect with Cloudflare OAuth or add a runtime token.",
@@ -344,8 +382,12 @@ export default {
       return Response.json({ servers: await listMcpServers(env) });
     }
 
-    if (url.pathname === "/mcp/servers" && request.method === "POST") {
+    if ((url.pathname === "/mcp/servers" || url.pathname === "/mcp/add") && request.method === "POST") {
       return handleMcpServerRegister(request, env);
+    }
+
+    if (url.pathname === "/mcp/state" && request.method === "GET") {
+      return Response.json({ servers: await listMcpServers(env) });
     }
 
     if (url.pathname === "/mcp/servers" && request.method === "DELETE") {
@@ -360,6 +402,10 @@ export default {
       return handleMcpCall(request, env);
     }
 
+    if (url.pathname === "/mcp/observability" && request.method === "GET") {
+      return handleMcpObservability(url, env);
+    }
+
     return Response.json({
       deploymentId,
       starterTemplate,
@@ -370,7 +416,8 @@ export default {
       endpoints,
       cloudAgentInstance: cloudAgentInstanceState(env),
       slashCommands: {
-        goal: goalCommandPayload("", env)
+        goal: goalCommandPayload("", env),
+        train: trainCommandPayload("")
       },
       subAgents: subAgentCapabilityState(env)
     });
@@ -402,6 +449,18 @@ function goalCommandPayload(goal = "", env) {
   };
 }
 
+function trainCommandPayload(task = "") {
+  const trimmedTask = String(task || "").trim();
+  return {
+    enabled: true,
+    command: "/train",
+    endpoint: "/learning",
+    behavior:
+      "Turns a request into an editable plan first, executes only after explicit approval, and offers to save reusable successful steps as skills.",
+    prompt: trainCommandPrompt(trimmedTask)
+  };
+}
+
 function goalCommandPrompt(goal) {
   if (!goal) {
     return [
@@ -421,6 +480,16 @@ function goalCommandPrompt(goal) {
   ].join("\\n");
 }
 
+function trainCommandPrompt(task) {
+  return [
+    "Train mode is active.",
+    task ? "Task: " + task : "No task text was provided.",
+    "Draft a numbered plan with objective, assumptions, steps, risk level, required tools, and expected artifacts.",
+    "Do not execute mutating tools until the owner approves the plan or a specific step.",
+    "After a successful run, suggest one concise reusable skill name and the trigger conditions for saving it."
+  ].join("\\n");
+}
+
 function goalCommandInstruction() {
   return [
     "Slash command /goal is enabled.",
@@ -432,10 +501,33 @@ function goalCommandInstruction() {
   ].join("\\n");
 }
 
+function trainCommandInstruction() {
+  return [
+    "Slash command /train is enabled.",
+    "When the owner's message begins with /train, treat the remaining text as a train-mode request.",
+    "In train mode, first draft an editable numbered plan with objective, assumptions, steps, tool needs, risks, and expected artifacts.",
+    "Wait for explicit approval before using mutating tools. Read-only inspection is allowed when it is needed to make the plan accurate.",
+    "After a successful trained run, offer to save the repeatable pattern as a skill with a short name and trigger conditions."
+  ].join("\\n");
+}
+
 function cloudAgentInstanceState(env) {
   const executorUrl = sanitizeHttpsUrl(env.OPEN_THINK_EXECUTOR_MCP_URL);
   return {
     ...generatedCloudAgentInstance,
+    codeMode: {
+      ...(generatedCloudAgentInstance.codeMode || {}),
+      enabled: codeModeEnabled(env),
+      cloudflareApiMcpUrl: cloudflareApiMcpServerUrl(env)
+    },
+    workspace: {
+      ...(generatedCloudAgentInstance.workspace || {}),
+      contextStore: {
+        ...((generatedCloudAgentInstance.workspace || {}).contextStore || {}),
+        vectorizeConfigured: Boolean(env.VECTORIZE)
+      },
+      approvalModes: ["auto", "ask-every-time", "allow-all", "full-auto"]
+    },
     skills: (generatedCloudAgentInstance.skills || []).map((skill) =>
       skill.id === "executor-mcp" ? { ...skill, enabled: Boolean(executorUrl) } : skill
     ),
@@ -466,7 +558,9 @@ function subAgentCapabilityState(env) {
     persistence: env.DB ? "D1 sub_agents and sub_agent_messages" : "unavailable until DB binding is configured",
     endpoints: ["/subagents", "/subagents/{id}", "/subagents/{id}/messages", "/subagents/{id}/control", "/subagents/{id}/summary"],
     controls: ["create", "pause", "resume", "archive", "summarize", "message", "brief-main-chat"],
-    modes: ["agents-sdk", "executor", "hybrid"]
+    modes: ["agents-sdk", "executor", "hybrid"],
+    nativeRuntime: "Agents SDK package deployments use subAgent() typed RPC with isolated SQLite.",
+    mcpRpc: "Same-Worker Agent to McpAgent RPC is the preferred internal MCP transport when the server is exported and bound."
   };
 }
 
@@ -576,6 +670,7 @@ async function resolveChatResponse(payload, env, modelSettings) {
         "You have direct awareness of this deployment through the runtime snapshot below. Do not say you lack the script name, D1 memory table, bindings, update strategy, or Cloudflare account context when it is present in that snapshot.",
         cloudAgentInstanceInstruction(env),
         goalCommandInstruction(),
+        trainCommandInstruction(),
         "You have explicit Cloudflare platform skills in the runtime snapshot. When asked about Sandbox, Containers, Workers, Pages, or deploying new software, use those skills. Do not claim Containers or Sandbox are impossible; say whether they are available in this runtime, what account plan/bindings are required, and how you would add them.",
         "Decision rule: Workers/Pages first for HTTP apps, APIs, static sites, scheduled jobs, queues, and edge-native integrations. Sandbox for untrusted or agent-generated code execution, command execution, file work, browser terminals, preview URLs, data analysis, and ephemeral IDE/CI workflows. Containers for custom runtimes, existing Docker images, long-running services, heavier CPU/memory/disk, Linux tools, or servers that Workers cannot run. Durable Objects coordinate stateful sessions and per-user instances. R2, D1, Queues, Vectorize, AI, Workflows, and Access compose around these choices.",
         "Builder workflow: first classify the requested software, then propose the smallest Cloudflare architecture, list required permissions/bindings/resources, identify paid-plan or beta gates, create a deployment plan, ask before cost-bearing/destructive operations, then use MCP/API/update tools to provision or generate the code. If the current runtime lacks a binding, explain the exact binding/config update needed instead of saying the feature is unavailable.",
@@ -1494,6 +1589,95 @@ function workspaceStatus(env) {
   };
 }
 
+async function handleWorkspaceRequest(request, env) {
+  if (request.method === "GET") {
+    return Response.json(await workspaceRuntimeState(env));
+  }
+
+  const payload = await request.json().catch(() => ({}));
+  const summary = compactText(payload.summary ?? payload.text ?? payload.message ?? "", 500);
+  if (!summary) {
+    return Response.json({ error: "summary, text, or message is required." }, { status: 400 });
+  }
+
+  const item = await recordWorkspaceContext(env, {
+    kind: compactText(payload.kind ?? "note", 40) || "note",
+    summary,
+    metadata: typeof payload.metadata === "object" && payload.metadata ? payload.metadata : {}
+  });
+  return Response.json({ ok: true, item, ...(await workspaceRuntimeState(env)) });
+}
+
+async function workspaceRuntimeState(env) {
+  const instance = cloudAgentInstanceState(env);
+  return {
+    workspace: instance.workspace,
+    status: workspaceStatus(env),
+    context: await workspaceContext(env),
+    codeMode: instance.codeMode,
+    subAgents: subAgentCapabilityState(env)
+  };
+}
+
+async function ensureWorkspaceContextTable(env) {
+  await env.DB.prepare(
+    "create table if not exists workspace_context (id text primary key, workspace_id text not null, kind text not null, summary text not null, metadata_json text not null, created_at text not null)"
+  ).run();
+}
+
+async function workspaceContext(env) {
+  if (!env.DB) {
+    return {
+      available: false,
+      items: [],
+      error: "D1 binding is not configured.",
+      vectorize: vectorizeStatus(env)
+    };
+  }
+  await ensureWorkspaceContextTable(env);
+  const rows = await env.DB.prepare(
+    "select id, workspace_id, kind, summary, metadata_json, created_at from workspace_context where workspace_id = ? order by datetime(created_at) desc limit 20"
+  ).bind("default").all();
+  return {
+    available: true,
+    table: "workspace_context",
+    items: (rows.results ?? []).map((row) => ({
+      id: String(row.id ?? ""),
+      workspaceId: String(row.workspace_id ?? "default"),
+      kind: String(row.kind ?? "note"),
+      summary: String(row.summary ?? ""),
+      metadata: parseJson(row.metadata_json, {}),
+      createdAt: String(row.created_at ?? "")
+    })),
+    vectorize: vectorizeStatus(env)
+  };
+}
+
+async function recordWorkspaceContext(env, input) {
+  const item = {
+    id: crypto.randomUUID(),
+    workspaceId: "default",
+    kind: input.kind,
+    summary: input.summary,
+    metadata: input.metadata,
+    createdAt: new Date().toISOString()
+  };
+  if (!env.DB) return { ...item, stored: false, error: "D1 binding is not configured." };
+  await ensureWorkspaceContextTable(env);
+  await env.DB.prepare(
+    "insert into workspace_context (id, workspace_id, kind, summary, metadata_json, created_at) values (?, ?, ?, ?, ?, ?)"
+  ).bind(item.id, item.workspaceId, item.kind, item.summary, JSON.stringify(item.metadata), item.createdAt).run();
+  return { ...item, stored: true };
+}
+
+function vectorizeStatus(env) {
+  return {
+    configured: Boolean(env.VECTORIZE),
+    binding: env.VECTORIZE ? "VECTORIZE" : null,
+    use: "shared semantic recall for workspace context once vector query tools are connected"
+  };
+}
+
 async function runtimeSnapshot(env) {
   const accountId = env.OPEN_THINK_CF_ACCOUNT_ID || cloudflareAccountId || null;
   const currentScript = runtimeScriptName(env) || null;
@@ -1521,7 +1705,8 @@ async function runtimeSnapshot(env) {
     cloudAgentInstance: cloudAgentInstanceState(env),
     subAgents: subAgentCapabilityState(env),
     slashCommands: {
-      goal: goalCommandPayload("", env)
+      goal: goalCommandPayload("", env),
+      train: trainCommandPayload("")
     },
     bindings: bindingStatus(env),
     storage: {
@@ -1535,7 +1720,8 @@ async function runtimeSnapshot(env) {
       builtIn: ["runtime_status", "memory_list", "set_active_goal", "create_sub_agent", "sub_agent_control", "sub_agent_message", "sub_agent_summary", "files_list", "queue_task", "secret_put", "binding_add", "update_status", "cloudflare_platform_advice", "mcp_call"],
       mcp: {
         cloudflare: {
-          serverUrl: "https://mcp.cloudflare.com/mcp",
+          serverUrl: cloudflareApiMcpServerUrl(env),
+          codeMode: codeModeEnabled(env),
           tools: ["search", "execute"],
           runtimeSecretAvailable: Boolean(env.OPEN_THINK_CF_API_TOKEN)
         },
@@ -1544,7 +1730,7 @@ async function runtimeSnapshot(env) {
       }
     },
     skills: cloudflarePlatformSkills(env),
-    workspace: workspaceStatus(env),
+    workspace: await workspaceRuntimeState(env),
     sourceUpdate: {
       platformUpdateApi: "/api/deployment/update on the open-think platform",
       githubUpstream: "Default update lane: check NeoFlux-Holdings/OpenThink, regenerate this Worker, upload with keep_bindings.",
@@ -2010,6 +2196,727 @@ async function handleSecretDelete(url, env) {
   return Response.json({ name, deleted: true, result });
 }
 
+const artifactVersionPrefix = "__versions__/";
+
+async function handleArtifactsRequest(request, env) {
+  const url = new URL(request.url);
+  if (!env.AGENT_STORAGE) {
+    return Response.json({
+      available: false,
+      artifacts: [],
+      note: "Bind AGENT_STORAGE R2 to enable artifact library reads, writes, and revision snapshots."
+    }, { status: request.method === "GET" ? 200 : 503 });
+  }
+
+  if (request.method === "GET") {
+    const key = normalizeArtifactKey(url.searchParams.get("key"));
+    if (key) {
+      const object = await env.AGENT_STORAGE.get(key);
+      if (!object) return Response.json({ error: "Artifact not found." }, { status: 404 });
+      const text = await object.text();
+      return Response.json({
+        key,
+        versionKey: key,
+        title: artifactTitleFromKey(key),
+        type: artifactTypeFromKey(key),
+        contentType: object.httpMetadata?.contentType || contentTypeFromArtifactKey(key),
+        size: object.size || text.length,
+        uploaded: object.uploaded || null,
+        text,
+        versions: url.searchParams.get("versions") === "1" ? await artifactVersions(env, key) : undefined
+      });
+    }
+
+    const list = await env.AGENT_STORAGE.list({ limit: 100 });
+    const versionCounts = artifactVersionCounts(list.objects || []);
+    return Response.json({
+      available: true,
+      binding: "AGENT_STORAGE",
+      artifacts: (list.objects || [])
+        .filter((object) => !object.key.startsWith(artifactVersionPrefix))
+        .map((object) => ({
+          key: object.key,
+          title: artifactTitleFromKey(object.key),
+          type: artifactTypeFromKey(object.key),
+          size: object.size || null,
+          uploadedAt: object.uploaded || null,
+          contentType: object.httpMetadata?.contentType || contentTypeFromArtifactKey(object.key),
+          versions: versionCounts.get(object.key) || 1
+        }))
+    });
+  }
+
+  if (request.method === "POST") {
+    const payload = await request.json().catch(() => ({}));
+    const key = normalizeArtifactKey(payload.key);
+    const text = normalizeLongText(payload.text ?? payload.content, "");
+    const contentType = normalizeLongText(payload.contentType, contentTypeFromArtifactKey(key));
+    if (!key || !text) return Response.json({ error: "key and text are required." }, { status: 400 });
+
+    let previousVersionKey = null;
+    const previous = await env.AGENT_STORAGE.get(key);
+    if (previous) {
+      previousVersionKey = artifactVersionKey(key);
+      await env.AGENT_STORAGE.put(previousVersionKey, await previous.text(), {
+        httpMetadata: { contentType: previous.httpMetadata?.contentType || contentTypeFromArtifactKey(key) }
+      });
+    }
+    await env.AGENT_STORAGE.put(key, text, {
+      httpMetadata: { contentType }
+    });
+    return Response.json({ ok: true, key, previousVersionKey });
+  }
+
+  return Response.json({ error: "Method not allowed" }, { status: 405 });
+}
+
+async function handleBrowserSnapshotRequest(request, env) {
+  if (request.method !== "POST") {
+    return Response.json({ error: "Method not allowed" }, { status: 405 });
+  }
+  const accountId = env.OPEN_THINK_CF_ACCOUNT_ID || cloudflareAccountId || null;
+  if (!env.OPEN_THINK_CF_API_TOKEN || !accountId) {
+    return Response.json({
+      ok: false,
+      status: "missing-configuration",
+      error: "OPEN_THINK_CF_API_TOKEN and OPEN_THINK_CF_ACCOUNT_ID are required for Cloudflare Browser Rendering snapshots.",
+      requiredPermission: "Browser Rendering Edit",
+      docs: "https://developers.cloudflare.com/browser-rendering/rest-api/snapshot/"
+    }, { status: 503 });
+  }
+
+  const input = await request.json().catch(() => ({}));
+  const targetUrl = normalizeLongText(input.url, "").trim();
+  const html = normalizeLongText(input.html, "").trim();
+  if (!targetUrl && !html) {
+    return Response.json({ ok: false, status: "missing-target", error: "Provide url or html." }, { status: 400 });
+  }
+
+  const requestBody = targetUrl ? { url: targetUrl } : { html };
+  const viewport = normalizeBrowserViewport(input.viewport);
+  if (viewport) requestBody.viewport = viewport;
+  requestBody.screenshotOptions = { fullPage: input.fullPage !== false };
+  if (input.waitUntil) {
+    requestBody.gotoOptions = { waitUntil: String(input.waitUntil), timeout: 30000 };
+  }
+
+  const response = await fetch(
+    "https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(accountId) + "/browser-rendering/snapshot",
+    {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + env.OPEN_THINK_CF_API_TOKEN,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(requestBody)
+    }
+  );
+  const body = await response.json().catch(() => ({}));
+  const result = body?.result && typeof body.result === "object" ? body.result : body;
+  if (!response.ok || body?.success === false) {
+    return Response.json({
+      ok: false,
+      status: "browser-rendering-failed",
+      error: body?.errors?.[0]?.message ?? body?.message ?? "Browser Rendering snapshot failed.",
+      cloudflareStatus: response.status,
+      requiredPermission: "Browser Rendering Edit",
+      docs: "https://developers.cloudflare.com/browser-rendering/rest-api/snapshot/"
+    }, { status: response.ok ? 502 : response.status });
+  }
+
+  const capturedAt = new Date().toISOString();
+  const screenshot = typeof result?.screenshot === "string" ? result.screenshot : "";
+  const content = typeof result?.content === "string" ? result.content : html;
+  const artifact = {
+    kind: "browser-session",
+    mode: "snapshot",
+    status: "captured",
+    url: targetUrl || null,
+    title: targetUrl ? browserArtifactTitle(targetUrl) : "HTML snapshot",
+    capturedAt,
+    screenshotDataUrl: screenshot ? "data:image/png;base64," + screenshot : null,
+    html: content,
+    events: [
+      { label: "Snapshot requested", status: "complete", at: capturedAt },
+      { label: screenshot ? "Screenshot captured" : "Screenshot unavailable", status: screenshot ? "complete" : "skipped", at: capturedAt },
+      { label: content ? "Rendered HTML captured" : "Rendered HTML unavailable", status: content ? "complete" : "skipped", at: capturedAt }
+    ],
+    source: "cloudflare-browser-rendering",
+    docs: "https://developers.cloudflare.com/browser-rendering/rest-api/snapshot/"
+  };
+  const key = normalizeArtifactKey(input.artifactKey) || defaultBrowserSnapshotArtifactKey(targetUrl || "html", capturedAt);
+
+  if (env.AGENT_STORAGE) {
+    await env.AGENT_STORAGE.put(key, JSON.stringify(artifact, null, 2), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" }
+    });
+  }
+
+  return Response.json({
+    ok: true,
+    status: "captured",
+    artifactKey: key,
+    stored: Boolean(env.AGENT_STORAGE),
+    url: targetUrl || null,
+    screenshot: Boolean(screenshot),
+    htmlCharacters: content.length,
+    summary: "Captured Browser Rendering snapshot" + (env.AGENT_STORAGE ? " and stored browser-session artifact." : ". Bind AGENT_STORAGE to persist it."),
+    artifact: env.AGENT_STORAGE ? undefined : artifact
+  });
+}
+
+async function handleBrowserDiagnosticsRequest(request, env) {
+  if (request.method !== "GET" && request.method !== "POST") {
+    return Response.json({ error: "Method not allowed" }, { status: 405 });
+  }
+
+  const live = request.method === "POST";
+  const payload = live ? await request.json().catch(() => ({})) : {};
+  const result = await browserDiagnostics(env, { ...payload, live });
+  return Response.json(result, { status: browserDiagnosticHttpStatus(result) });
+}
+
+async function browserDiagnostics(env, input) {
+  const live = input.live === true;
+  const stages = [];
+  const config = browserRenderingConfig(env);
+  const base = {
+    mode: live ? "live" : "read-only",
+    stages,
+    accountIdConfigured: Boolean(String(env.OPEN_THINK_CF_ACCOUNT_ID || cloudflareAccountId || "").trim()),
+    tokenConfigured: Boolean(String(env.OPEN_THINK_CF_API_TOKEN || "").trim()),
+    requiredPermission: "Browser Rendering Edit",
+    docs: "https://developers.cloudflare.com/browser-run/cdp/session-management/"
+  };
+
+  if (!config.ok) {
+    stages.push(browserDiagnosticStage("configuration", "Cloudflare Browser Rendering credentials", "error", "Missing Browser Run credentials.", config.error));
+    stages.push(browserDiagnosticStage("api", "Browser Run API reachability", "skipped", "Skipped because Browser Run configuration is incomplete."));
+    return {
+      ...base,
+      ok: false,
+      status: "missing-configuration",
+      summary: "Browser Run is not configured. Set OPEN_THINK_CF_ACCOUNT_ID and OPEN_THINK_CF_API_TOKEN with Browser Rendering Edit permission.",
+      error: config.error
+    };
+  }
+
+  stages.push(browserDiagnosticStage("configuration", "Cloudflare Browser Rendering credentials", "complete", "Account ID and API token are present."));
+  const listCall = await callBrowserRunApi(config, "/browser-rendering/devtools/session?limit=1&offset=0", { method: "GET" });
+  if (!listCall.ok) {
+    stages.push(browserDiagnosticStage("api", "Browser Run API reachability", "error", "Cloudflare rejected the Browser Run API check.", listCall.error));
+    return {
+      ...base,
+      ok: false,
+      status: "api-unavailable",
+      summary: "Browser Run credentials are present, but the Cloudflare API check failed.",
+      error: listCall.error,
+      cloudflareStatus: listCall.cloudflareStatus,
+      cloudflare: listCall.body
+    };
+  }
+
+  stages.push(browserDiagnosticStage("api", "Browser Run API reachability", "complete", "Cloudflare Browser Run API accepted a session-list request."));
+  if (!live) {
+    stages.push(browserDiagnosticStage("live-session", "Live target self-test", "skipped", "Use POST /browser/diagnostics to create a short-lived session and verify target readiness."));
+    return {
+      ...base,
+      ok: true,
+      status: "configured",
+      summary: "Browser Run is configured. The raw Worker fallback can verify target readiness; the Agents SDK runtime adds CDP frame streaming."
+    };
+  }
+
+  const keepAliveMs = normalizeKeepAliveMs(input.keepAliveMs || 60000);
+  const targetUrl = sanitizeHttpsUrl(input.url) || "https://developers.cloudflare.com/browser-run/";
+  let sessionId = "";
+  let targetId = "";
+  let hasWebSocketDebuggerUrl = false;
+  let status = "live-check-failed";
+  let summary = "Browser Run live target check did not complete.";
+  let error;
+
+  try {
+    const params = new URLSearchParams({ keep_alive: String(keepAliveMs), targets: "true", recording: "false" });
+    const createCall = await callBrowserRunApi(config, "/browser-rendering/devtools/browser?" + params.toString(), { method: "POST" });
+    if (!createCall.ok) {
+      stages.push(browserDiagnosticStage("session", "Create short-lived Browser Run session", "error", "Cloudflare could not create a Browser Run session.", createCall.error));
+      error = createCall.error;
+    } else {
+      const session = normalizeBrowserSession(createCall.result);
+      sessionId = normalizeBrowserId(session.sessionId);
+      stages.push(browserDiagnosticStage(
+        "session",
+        "Create short-lived Browser Run session",
+        sessionId ? "complete" : "error",
+        sessionId ? "Created temporary Browser Run session " + sessionId + "." : "Cloudflare did not return a sessionId."
+      ));
+
+      if (sessionId) {
+        const targetResult = await browserCreateTarget(config, sessionId, targetUrl);
+        const target = targetResult.target && typeof targetResult.target === "object" ? targetResult.target : undefined;
+        targetId = normalizeBrowserId(target?.id);
+        hasWebSocketDebuggerUrl = Boolean(typeof target?.webSocketDebuggerUrl === "string" && target.webSocketDebuggerUrl);
+        stages.push(browserDiagnosticStage(
+          "target",
+          "Open diagnostic target",
+          targetResult.ok && targetId ? "complete" : "error",
+          targetResult.ok && targetId ? "Opened " + targetUrl + " as target " + targetId + "." : "Could not open a diagnostic target.",
+          targetResult.ok ? undefined : String(targetResult.error || "Target creation failed.")
+        ));
+        stages.push(browserDiagnosticStage(
+          "cdp-url",
+          "CDP websocket URL",
+          hasWebSocketDebuggerUrl ? "complete" : "warning",
+          hasWebSocketDebuggerUrl
+            ? "Target exposes a CDP websocket URL."
+            : "Target did not expose a CDP websocket URL. Deploy the Agents SDK runtime for frame streaming diagnostics."
+        ));
+        status = hasWebSocketDebuggerUrl ? "target-ready" : "missing-websocket";
+        summary = hasWebSocketDebuggerUrl
+          ? "Browser Run raw fallback check passed through target creation and CDP URL discovery."
+          : "Browser Run target was created, but no CDP websocket URL was returned.";
+      }
+    }
+  } catch (diagnosticError) {
+    error = diagnosticError instanceof Error ? diagnosticError.message : "Browser Run live check failed.";
+    stages.push(browserDiagnosticStage("live-check", "Run live target self-test", "error", "Browser Run live check threw before completion.", error));
+  } finally {
+    if (sessionId) {
+      const cleanupCall = await callBrowserRunApi(config, "/browser-rendering/devtools/browser/" + encodeURIComponent(sessionId), { method: "DELETE" });
+      stages.push(browserDiagnosticStage(
+        "cleanup",
+        "Close diagnostic session",
+        cleanupCall.ok ? "complete" : "warning",
+        cleanupCall.ok ? "Closed temporary Browser Run session." : "Could not confirm cleanup of temporary Browser Run session.",
+        cleanupCall.ok ? undefined : cleanupCall.error
+      ));
+    } else {
+      stages.push(browserDiagnosticStage("cleanup", "Close diagnostic session", "skipped", "No Browser Run session was created."));
+    }
+  }
+
+  return {
+    ...base,
+    ok: status === "target-ready",
+    status,
+    summary,
+    sessionId: sessionId || undefined,
+    targetId: targetId || undefined,
+    hasWebSocketDebuggerUrl,
+    error
+  };
+}
+
+function browserDiagnosticStage(id, label, status, summary, detail) {
+  return {
+    id,
+    label,
+    status,
+    summary,
+    ...(detail ? { detail } : {}),
+    at: new Date().toISOString()
+  };
+}
+
+function browserDiagnosticHttpStatus(result) {
+  if (result.ok === true) return 200;
+  if (result.status === "missing-configuration") return 503;
+  if (result.status === "api-unavailable" && typeof result.cloudflareStatus === "number") return result.cloudflareStatus;
+  return 500;
+}
+
+function parseBrowserSessionRoute(pathname) {
+  const marker = "/browser/sessions";
+  const index = pathname.lastIndexOf(marker);
+  if (index < 0) return null;
+  const suffix = pathname.slice(index + marker.length);
+  if (suffix && !suffix.startsWith("/")) return null;
+  const parts = suffix
+    .split("/")
+    .filter(Boolean)
+    .map((part) => decodeURIComponent(part));
+  if (parts.length === 0) return { kind: "sessions" };
+  if (parts.length === 1) return { kind: "session", sessionId: parts[0] };
+  if (parts.length === 2 && parts[1] === "targets") return { kind: "targets", sessionId: parts[0] };
+  if (parts.length === 3 && parts[1] === "targets") return { kind: "target", sessionId: parts[0], targetId: parts[2] };
+  return null;
+}
+
+async function handleBrowserSessionsRequest(request, env, route) {
+  const url = new URL(request.url);
+  let input;
+
+  if (route.kind === "sessions") {
+    if (request.method === "GET") {
+      input = {
+        action: "list",
+        limit: Number(url.searchParams.get("limit") || 20),
+        offset: Number(url.searchParams.get("offset") || 0)
+      };
+    } else if (request.method === "POST") {
+      input = { ...(await request.json().catch(() => ({}))), action: "create" };
+    } else {
+      return Response.json({ error: "Method not allowed" }, { status: 405 });
+    }
+  } else if (route.kind === "session") {
+    if (request.method === "GET") input = { action: "get", sessionId: route.sessionId };
+    else if (request.method === "DELETE") input = { action: "close", sessionId: route.sessionId };
+    else return Response.json({ error: "Method not allowed" }, { status: 405 });
+  } else if (route.kind === "targets") {
+    if (request.method === "GET") input = { action: "listTargets", sessionId: route.sessionId };
+    else if (request.method === "POST") input = { ...(await request.json().catch(() => ({}))), action: "createTarget", sessionId: route.sessionId };
+    else return Response.json({ error: "Method not allowed" }, { status: 405 });
+  } else if (request.method === "GET") {
+    input = { action: "getTarget", sessionId: route.sessionId, targetId: route.targetId };
+  } else if (request.method === "DELETE") {
+    input = { action: "closeTarget", sessionId: route.sessionId, targetId: route.targetId };
+  } else {
+    return Response.json({ error: "Method not allowed" }, { status: 405 });
+  }
+
+  const result = await browserSessionOperation(env, input);
+  return Response.json(result, { status: browserSessionHttpStatus(result) });
+}
+
+async function browserSessionOperation(env, input) {
+  const action = input.action || "create";
+  const config = browserRenderingConfig(env);
+  if (!config.ok) return config;
+
+  if (action === "create") {
+    return browserCreateLiveSession(env, input);
+  }
+
+  if (action === "list") {
+    const params = new URLSearchParams();
+    const limit = normalizeBrowserLimit(input.limit, 20);
+    const offset = normalizeBrowserLimit(input.offset, 0);
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    const call = await callBrowserRunApi(config, "/browser-rendering/devtools/session?" + params.toString(), { method: "GET" });
+    if (!call.ok) return browserRunFailure(call);
+    const sessions = Array.isArray(call.result) ? call.result.map(normalizeBrowserSession) : [];
+    return {
+      ok: true,
+      status: "listed",
+      sessions,
+      summary: sessions.length + " Browser Run session" + (sessions.length === 1 ? "" : "s") + " found."
+    };
+  }
+
+  const sessionId = normalizeBrowserId(input.sessionId);
+  if (action !== "create" && !sessionId) {
+    return { ok: false, status: "missing-session", error: "sessionId is required." };
+  }
+
+  if (action === "get") {
+    const call = await callBrowserRunApi(config, "/browser-rendering/devtools/session/" + encodeURIComponent(sessionId), { method: "GET" });
+    if (!call.ok) return browserRunFailure(call);
+    const session = normalizeBrowserSession(call.result);
+    return { ok: true, status: "ready", sessionId, session, summary: "Browser Run session " + sessionId + " is ready." };
+  }
+
+  if (action === "close") {
+    const call = await callBrowserRunApi(config, "/browser-rendering/devtools/browser/" + encodeURIComponent(sessionId), { method: "DELETE" });
+    if (!call.ok) return browserRunFailure(call);
+    return { ok: true, status: "closed", sessionId, result: call.result, summary: "Browser Run session " + sessionId + " is closing." };
+  }
+
+  if (action === "listTargets") return browserListTargets(config, sessionId);
+  if (action === "createTarget") return browserCreateTarget(config, sessionId, input.url);
+
+  const targetId = normalizeBrowserId(input.targetId);
+  if (!targetId) return { ok: false, status: "missing-target", error: "targetId is required." };
+
+  if (action === "getTarget") {
+    const call = await callBrowserRunApi(
+      config,
+      "/browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/json/list/" + encodeURIComponent(targetId),
+      { method: "GET" }
+    );
+    if (!call.ok) return browserRunFailure(call);
+    const target = normalizeBrowserTarget(call.result);
+    return { ok: true, status: "target-ready", sessionId, target, summary: browserTargetSummary("Browser target is ready", target) };
+  }
+
+  const call = await callBrowserRunApi(
+    config,
+    "/browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/json/close/" + encodeURIComponent(targetId),
+    { method: "DELETE" }
+  );
+  if (!call.ok) return browserRunFailure(call);
+  return { ok: true, status: "target-closed", sessionId, targetId, result: call.result, summary: "Browser target " + targetId + " is closing." };
+}
+
+async function browserCreateLiveSession(env, input) {
+  const config = browserRenderingConfig(env);
+  if (!config.ok) return config;
+  const keepAliveMs = normalizeKeepAliveMs(input.keepAliveMs);
+  const includeTargets = input.targets !== false;
+  const params = new URLSearchParams({
+    keep_alive: String(keepAliveMs),
+    targets: includeTargets ? "true" : "false"
+  });
+  if (typeof input.recording === "boolean") params.set("recording", input.recording ? "true" : "false");
+
+  const call = await callBrowserRunApi(config, "/browser-rendering/devtools/browser?" + params.toString(), { method: "POST" });
+  if (!call.ok) return browserRunFailure(call);
+
+  const session = normalizeBrowserSession(call.result);
+  const sessionId = normalizeBrowserId(session.sessionId);
+  if (!sessionId) return { ok: false, status: "browser-rendering-failed", error: "Cloudflare did not return a Browser Run sessionId." };
+
+  let target;
+  if (input.url) {
+    const targetResult = await browserCreateTarget(config, sessionId, input.url);
+    if (!targetResult.ok) return targetResult;
+    target = targetResult.target;
+  }
+
+  let targets = Array.isArray(session.targets) ? session.targets.filter(isBrowserRecord) : [];
+  if (targets.length === 0 && includeTargets) {
+    const targetList = await browserListTargets(config, sessionId);
+    if (targetList.ok && Array.isArray(targetList.targets)) targets = targetList.targets.filter(isBrowserRecord);
+  }
+  if (target) targets = [target, ...targets.filter((item) => item.id !== target.id)];
+
+  const chosenTarget = target || targets[0];
+  const capturedAt = new Date().toISOString();
+  const artifact = {
+    kind: "browser-session",
+    mode: "live",
+    status: "ready",
+    title: chosenTarget?.title || chosenTarget?.url || "Browser Run live session",
+    url: chosenTarget?.url || input.url || "about:blank",
+    sessionId,
+    keepAliveMs,
+    createdAt: capturedAt,
+    devtoolsFrontendUrl: chosenTarget?.devtoolsFrontendUrl,
+    takeoverUrl: chosenTarget?.devtoolsFrontendUrl,
+    webSocketDebuggerUrl: chosenTarget?.webSocketDebuggerUrl || session.webSocketDebuggerUrl,
+    session,
+    target: chosenTarget,
+    targets,
+    events: [
+      { label: "Browser Run session created", status: "complete", at: capturedAt },
+      { label: targets.length ? "Live View target ready" : "No target returned yet", status: targets.length ? "complete" : "pending", at: capturedAt }
+    ],
+    source: "cloudflare-browser-run",
+    docs: "https://developers.cloudflare.com/browser-run/cdp/session-management/"
+  };
+  const key = normalizeArtifactKey(input.artifactKey) || defaultBrowserSessionArtifactKey(sessionId, capturedAt);
+
+  if (env.AGENT_STORAGE) {
+    await env.AGENT_STORAGE.put(key, JSON.stringify(artifact, null, 2), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" }
+    });
+  }
+
+  return {
+    ok: true,
+    status: "created",
+    sessionId,
+    session,
+    target: chosenTarget,
+    targets,
+    artifactKey: key,
+    stored: Boolean(env.AGENT_STORAGE),
+    keepAliveMs,
+    summary: browserTargetSummary("Browser Run live session ready", chosenTarget),
+    artifact: env.AGENT_STORAGE ? undefined : artifact
+  };
+}
+
+async function browserListTargets(config, sessionId) {
+  const call = await callBrowserRunApi(
+    config,
+    "/browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/json/list",
+    { method: "GET" }
+  );
+  if (!call.ok) return browserRunFailure(call);
+  const targets = Array.isArray(call.result) ? call.result.map(normalizeBrowserTarget) : [];
+  return {
+    ok: true,
+    status: "targets-listed",
+    sessionId,
+    targets,
+    summary: targets.length + " Browser Run target" + (targets.length === 1 ? "" : "s") + " found."
+  };
+}
+
+async function browserCreateTarget(config, sessionId, targetUrl) {
+  const params = new URLSearchParams();
+  const normalizedUrl = typeof targetUrl === "string" ? targetUrl.trim() : "";
+  if (normalizedUrl) params.set("url", normalizedUrl);
+  const suffix = params.toString() ? "?" + params.toString() : "";
+  const call = await callBrowserRunApi(
+    config,
+    "/browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/json/new" + suffix,
+    { method: "PUT" }
+  );
+  if (!call.ok) return browserRunFailure(call);
+  const target = normalizeBrowserTarget(call.result);
+  return { ok: true, status: "target-created", sessionId, target, summary: browserTargetSummary("Browser Run target ready", target) };
+}
+
+function browserRenderingConfig(env) {
+  const accountId = String(env.OPEN_THINK_CF_ACCOUNT_ID || cloudflareAccountId || "").trim();
+  const apiToken = String(env.OPEN_THINK_CF_API_TOKEN || "").trim();
+  if (!accountId || !apiToken) {
+    return {
+      ok: false,
+      status: "missing-configuration",
+      error: "OPEN_THINK_CF_ACCOUNT_ID and OPEN_THINK_CF_API_TOKEN are required for Cloudflare Browser Run sessions.",
+      requiredPermission: "Browser Rendering Edit",
+      docs: "https://developers.cloudflare.com/browser-run/cdp/session-management/"
+    };
+  }
+  return { ok: true, accountId, apiToken };
+}
+
+async function callBrowserRunApi(config, path, init) {
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", "Bearer " + config.apiToken);
+  const response = await fetch(
+    "https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(config.accountId) + path,
+    { ...init, headers }
+  );
+  const body = await response.json().catch(() => ({}));
+  const result = body && typeof body === "object" && "result" in body ? body.result : body;
+  if (!response.ok || body.success === false) {
+    return {
+      ok: false,
+      cloudflareStatus: response.status,
+      body,
+      error: String(body?.errors?.[0]?.message ?? body?.message ?? "Cloudflare Browser Run request failed.")
+    };
+  }
+  return { ok: true, cloudflareStatus: response.status, result, body };
+}
+
+function browserRunFailure(call) {
+  return {
+    ok: false,
+    status: "browser-rendering-failed",
+    error: call.error || "Cloudflare Browser Run request failed.",
+    cloudflareStatus: call.cloudflareStatus,
+    requiredPermission: "Browser Rendering Edit",
+    docs: "https://developers.cloudflare.com/browser-run/cdp/session-management/",
+    cloudflare: call.body
+  };
+}
+
+function browserSessionHttpStatus(result) {
+  if (result.ok === true) return result.status === "created" || result.status === "target-created" ? 201 : 200;
+  if (result.status === "missing-configuration") return 503;
+  if (result.status === "missing-session" || result.status === "missing-target") return 400;
+  if (result.status === "browser-rendering-failed" && typeof result.cloudflareStatus === "number") return result.cloudflareStatus;
+  return 500;
+}
+
+function normalizeBrowserSession(value) {
+  return value && typeof value === "object" ? value : {};
+}
+
+function normalizeBrowserTarget(value) {
+  return value && typeof value === "object" ? value : {};
+}
+
+function isBrowserRecord(value) {
+  return Boolean(value && typeof value === "object");
+}
+
+function normalizeBrowserId(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeKeepAliveMs(value) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return 600000;
+  return Math.max(30000, Math.min(600000, Math.round(numberValue)));
+}
+
+function normalizeBrowserLimit(value, fallback) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(numberValue)));
+}
+
+function defaultBrowserSessionArtifactKey(sessionId, capturedAt) {
+  return normalizeArtifactKey(
+    "browser/sessions/" + slugify(sessionId || "session") + "/" + capturedAt.replace(/[:.]/g, "-") + ".browser.json"
+  );
+}
+
+function browserTargetSummary(prefix, target) {
+  const title = typeof target?.title === "string" && target.title ? target.title : undefined;
+  const url = typeof target?.url === "string" && target.url ? target.url : undefined;
+  const liveView = typeof target?.devtoolsFrontendUrl === "string" && target.devtoolsFrontendUrl
+    ? " Live View is available."
+    : " List targets to refresh the Live View URL.";
+  return prefix + (title || url ? ": " + (title || url) + "." : ".") + liveView;
+}
+
+async function handleContributionRequest(request, env) {
+  if (request.method === "GET") {
+    return Response.json(contributionCapabilityState(env));
+  }
+  if (request.method !== "POST") {
+    return Response.json({ error: "Method not allowed" }, { status: 405 });
+  }
+  if (!env.OPEN_THINK_GITHUB_TOKEN) {
+    return Response.json({
+      error: "OPEN_THINK_GITHUB_TOKEN is required to open upstream pull requests.",
+      ...contributionCapabilityState(env)
+    }, { status: 409 });
+  }
+
+  const payload = await request.json().catch(() => ({}));
+  const title = normalizeLongText(payload.title, "");
+  if (!title) return Response.json({ error: "title is required." }, { status: 400 });
+
+  const config = remoteUpdateConfig(env);
+  const repository = normalizeGithubRepository(payload.repository || config.repository);
+  const baseBranch = normalizeGithubBranch(payload.baseBranch, config.branch);
+  const branchName = normalizeGithubBranch(
+    payload.branchName,
+    "open-think/agent-" + slugify(title) + "-" + Date.now().toString(36)
+  );
+  const body = normalizeLongText(payload.body ?? payload.summary, "Agent-authored contribution prepared by OpenThink.");
+  const changes = await contributionChangesFromPayload(payload, env, { repository, baseBranch });
+  if (changes.length === 0) {
+    return Response.json({ error: "Provide changes or artifactKeys to create a pull request." }, { status: 400 });
+  }
+
+  try {
+    const pullRequest = await createGithubContributionPullRequest(env, {
+      repository,
+      baseBranch,
+      branchName,
+      title,
+      body,
+      changes
+    });
+    await recordContributionPullRequest(env, {
+      id: crypto.randomUUID(),
+      title,
+      branchName,
+      url: pullRequest.html_url,
+      status: "open",
+      createdAt: new Date().toISOString()
+    });
+    return Response.json({ ok: true, repository, baseBranch, branchName, pullRequest }, { status: 201 });
+  } catch (error) {
+    return Response.json({
+      error: error instanceof Error ? error.message : "GitHub pull request creation failed.",
+      repository,
+      baseBranch,
+      branchName
+    }, { status: 502 });
+  }
+}
+
 async function handleUpdateStatus(env) {
   return Response.json(await updateStatusPayload(env));
 }
@@ -2403,16 +3310,17 @@ async function handleMcpServerRemove(request, env) {
 
 async function handleMcpTools(url, env) {
   const server = String(url.searchParams.get("server") ?? "cloudflare").trim();
+  const startedAt = Date.now();
   if (server === "cloudflare") {
-    return Response.json({ server: "cloudflare", tools: cloudflareMcpTools() });
+    return observedMcpJson(env, { server, tool: "list_tools", transport: "raw-worker", status: "success", startedAt, summary: "Listed built-in Cloudflare tools." }, { server: "cloudflare", tools: cloudflareMcpTools() });
   }
   if (server === "executor") {
     const record = executorMcpServer(env);
     if (!record) {
-      return Response.json({ error: "OPEN_THINK_EXECUTOR_MCP_URL is not configured." }, { status: 503 });
+      return observedMcpJson(env, { server, tool: "list_tools", transport: "streamable-http", status: "error", startedAt, summary: "Executor MCP URL is not configured." }, { error: "OPEN_THINK_EXECUTOR_MCP_URL is not configured." }, { status: 503 });
     }
     const result = await mcpRequest(record.url, "tools/list", {}, executorMcpHeaders(env));
-    return Response.json({
+    return observedMcpJson(env, { server, tool: "list_tools", transport: record.transport || "streamable-http", status: result.ok ? "success" : "error", startedAt, summary: result.ok ? "Listed executor MCP tools." : String(result.error || "Executor MCP tool listing failed.") }, {
       server: record,
       tools: result.result?.tools ?? [],
       raw: result
@@ -2420,10 +3328,10 @@ async function handleMcpTools(url, env) {
   }
 
   const record = await getMcpServer(env, server);
-  if (!record) return Response.json({ error: "MCP server not found." }, { status: 404 });
+  if (!record) return observedMcpJson(env, { server, tool: "list_tools", transport: "streamable-http", status: "error", startedAt, summary: "MCP server not found." }, { error: "MCP server not found." }, { status: 404 });
   const result = await mcpRequest(record.url, "tools/list", {});
   await markMcpServer(env, record.id, result.ok ? "ready" : "failed", result.ok ? null : result.error);
-  return Response.json({
+  return observedMcpJson(env, { server: record.name || server, tool: "list_tools", transport: record.transport || "streamable-http", status: result.ok ? "success" : "error", startedAt, summary: result.ok ? "Listed MCP tools." : String(result.error || "MCP tool listing failed.") }, {
     server: record,
     tools: result.result?.tools ?? [],
     raw: result
@@ -2431,35 +3339,159 @@ async function handleMcpTools(url, env) {
 }
 
 async function handleMcpCall(request, env) {
+  const startedAt = Date.now();
   const payload = await request.json().catch(() => ({}));
   const server = String(payload.server ?? "cloudflare").trim();
   const name = String(payload.name ?? "").trim();
   const args = payload.arguments ?? payload.args ?? {};
-  if (!name) return Response.json({ error: "Tool name is required." }, { status: 400 });
+  if (!name) return observedMcpJson(env, { server, tool: "call_tool", transport: "raw-worker", status: "error", startedAt, summary: "Tool name is required." }, { error: "Tool name is required." }, { status: 400 });
 
   if (server === "cloudflare") {
-    return Response.json({
+    const result = await callCloudflareMcpTool(name, args, env);
+    return observedMcpJson(env, { server, tool: name, transport: "raw-worker", status: result?.ok === false ? "error" : "success", startedAt, summary: result?.error || "Cloudflare MCP tool completed." }, {
       server: "cloudflare",
       tool: name,
-      result: await callCloudflareMcpTool(name, args, env)
+      result
     });
   }
   if (server === "executor") {
-    return Response.json({
+    const result = await callExecutorMcpTool(name, args, env);
+    return observedMcpJson(env, { server, tool: name, transport: "streamable-http", status: result?.ok === false ? "error" : "success", startedAt, summary: result?.error || "Executor MCP tool completed." }, {
       server: executorMcpServerStatus(env),
       tool: name,
-      result: await callExecutorMcpTool(name, args, env)
+      result
     });
   }
 
   const record = await getMcpServer(env, server);
-  if (!record) return Response.json({ error: "MCP server not found." }, { status: 404 });
+  if (!record) return observedMcpJson(env, { server, tool: name, transport: "streamable-http", status: "error", startedAt, summary: "MCP server not found." }, { error: "MCP server not found." }, { status: 404 });
   const result = await mcpRequest(record.url, "tools/call", {
     name,
     arguments: args
   });
   await markMcpServer(env, record.id, result.ok ? "ready" : "failed", result.ok ? null : result.error);
-  return Response.json({ server: record, tool: name, result });
+  return observedMcpJson(env, { server: record.name || server, tool: name, transport: record.transport || "streamable-http", status: result.ok ? "success" : "error", startedAt, summary: result.ok ? "MCP tool completed." : String(result.error || "MCP tool failed.") }, { server: record, tool: name, result });
+}
+
+async function handleMcpObservability(url, env) {
+  const state = await mcpObservabilityState(env, { includeSeries: url.searchParams.get("series") === "1" });
+  return Response.json(state);
+}
+
+async function observedMcpJson(env, event, payload, init) {
+  await recordMcpObservation(env, event);
+  return Response.json(payload, init);
+}
+
+async function ensureMcpObservabilityTable(env) {
+  if (!env.DB) return false;
+  await env.DB.prepare(
+    "create table if not exists mcp_observability (id text primary key, server text not null, tool text not null, transport text not null, status text not null, latency_ms integer not null, summary text not null, created_at text not null)"
+  ).run();
+  return true;
+}
+
+async function recordMcpObservation(env, event) {
+  if (!(await ensureMcpObservabilityTable(env))) return;
+  const startedAt = Number(event.startedAt || Date.now());
+  const latencyMs = Number.isFinite(event.latencyMs) ? Number(event.latencyMs) : Math.max(0, Date.now() - startedAt);
+  await env.DB.prepare(
+    "insert into mcp_observability (id, server, tool, transport, status, latency_ms, summary, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).bind(
+    crypto.randomUUID(),
+    compactText(String(event.server || "unknown"), 120),
+    compactText(String(event.tool || "unknown"), 160),
+    compactText(String(event.transport || "unknown"), 120),
+    event.status === "error" ? "error" : "success",
+    Math.round(latencyMs),
+    compactText(String(event.summary || ""), 1000),
+    new Date().toISOString()
+  ).run().catch(() => undefined);
+}
+
+async function mcpObservabilityState(env, options = {}) {
+  if (!(await ensureMcpObservabilityTable(env))) {
+    return {
+      available: false,
+      status: "preview",
+      note: "Bind D1 to persist MCP and executor call observability.",
+      servers: (await listMcpServers(env)).map((server) => ({ ...server, calls: 0, failures: 0 })),
+      recentEvents: []
+    };
+  }
+  const rows = await env.DB.prepare(
+    "select * from mcp_observability order by datetime(created_at) desc limit 100"
+  ).all();
+  const events = (rows.results || []).map((row) => ({
+    id: String(row.id || ""),
+    server: String(row.server || "unknown"),
+    tool: String(row.tool || "unknown"),
+    transport: String(row.transport || "unknown"),
+    status: String(row.status || "success") === "error" ? "error" : "success",
+    latencyMs: Number(row.latency_ms || 0),
+    summary: String(row.summary || ""),
+    createdAt: String(row.created_at || "")
+  }));
+  const byServer = new Map();
+  for (const event of events) {
+    const current = byServer.get(event.server) || { calls: 0, failures: 0, totalLatencyMs: 0, lastEvent: null };
+    current.calls += 1;
+    current.failures += event.status === "error" ? 1 : 0;
+    current.totalLatencyMs += event.latencyMs;
+    current.lastEvent ||= event;
+    byServer.set(event.server, current);
+  }
+  const servers = (await listMcpServers(env)).map((server) => {
+    const name = String(server.name || server.id || "unknown");
+    const metrics = byServer.get(name) || { calls: 0, failures: 0, totalLatencyMs: 0, lastEvent: null };
+    return {
+      ...server,
+      calls: metrics.calls,
+      failures: metrics.failures,
+      avgLatencyMs: metrics.calls ? Math.round(metrics.totalLatencyMs / metrics.calls) : 0,
+      lastEvent: metrics.lastEvent
+    };
+  });
+  return {
+    available: true,
+    status: "tracked",
+    totals: {
+      calls: events.length,
+      failures: events.filter((event) => event.status === "error").length,
+      servers: servers.length
+    },
+    servers,
+    recentEvents: events.slice(0, 25),
+    ...(options.includeSeries ? { series: mcpObservabilitySeries(events) } : {})
+  };
+}
+
+function mcpObservabilitySeries(events) {
+  const buckets = new Map();
+  for (const event of events) {
+    const timestamp = event.createdAt.slice(0, 16) + ":00Z";
+    const key = timestamp + "|" + event.server;
+    const bucket = buckets.get(key) || {
+      timestamp,
+      server: event.server,
+      calls: 0,
+      failures: 0,
+      totalLatencyMs: 0
+    };
+    bucket.calls += 1;
+    bucket.failures += event.status === "error" ? 1 : 0;
+    bucket.totalLatencyMs += event.latencyMs;
+    buckets.set(key, bucket);
+  }
+  return [...buckets.values()]
+    .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.server.localeCompare(right.server))
+    .map((bucket) => ({
+      timestamp: bucket.timestamp,
+      server: bucket.server,
+      calls: bucket.calls,
+      failures: bucket.failures,
+      avgLatencyMs: bucket.calls ? Math.round(bucket.totalLatencyMs / bucket.calls) : 0
+    }));
 }
 
 async function callCloudflareMcpTool(name, args, env) {
@@ -3016,11 +4048,12 @@ async function listMcpServers(env) {
   const builtIn = {
     id: "cloudflare",
     name: "Cloudflare API",
-    url: "https://mcp.cloudflare.com/mcp",
+    url: cloudflareApiMcpServerUrl(env),
     transport: "runtime-secret-bridge",
     state: env.OPEN_THINK_CF_API_TOKEN ? "ready" : "authenticating",
     error: env.OPEN_THINK_CF_API_TOKEN ? null : "Cloudflare runtime token secret is not configured.",
-    builtIn: true
+    builtIn: true,
+    codeMode: codeModeEnabled(env)
   };
   const executor = executorMcpServerStatus(env);
 
@@ -3081,6 +4114,19 @@ function sanitizeHttpsUrl(value) {
   }
 }
 
+function runtimeFlagDisabled(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "0" || normalized === "false" || normalized === "off" || normalized === "disabled";
+}
+
+function codeModeEnabled(env) {
+  return !runtimeFlagDisabled(env.OPEN_THINK_CLOUDFLARE_MCP_CODE_MODE);
+}
+
+function cloudflareApiMcpServerUrl(env) {
+  return codeModeEnabled(env) ? cloudflareCodeModeMcpServerUrl : cloudflareMcpBaseUrl;
+}
+
 function executorMcpServerStatus(env) {
   const url = sanitizeHttpsUrl(env.OPEN_THINK_EXECUTOR_MCP_URL);
   return {
@@ -3137,6 +4183,406 @@ function sanitizeObjectKey(value) {
   const key = String(value ?? "").trim().replace(/^\\/+/, "");
   if (!key || key.includes("..")) return "";
   return key.slice(0, 512);
+}
+
+function normalizeArtifactKey(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/^[/]+/, "")
+    .replace(/[.][.]+/g, ".")
+    .replace(/[^a-zA-Z0-9/_.,=+@-]+/g, "-")
+    .slice(0, 240);
+}
+
+function artifactTypeFromKey(key) {
+  const normalized = key.toLowerCase();
+  if (normalized.endsWith(".browser.json") || normalized.endsWith(".browser-session.json")) return "browser-session";
+  if (normalized.endsWith(".diff") || normalized.endsWith(".patch")) return "diff";
+  if (normalized.endsWith(".md") || normalized.endsWith(".txt")) return "document";
+  if (normalized.endsWith(".html") || normalized.endsWith(".htm")) return "webpage";
+  if (normalized.endsWith(".json") || normalized.endsWith(".csv") || normalized.endsWith(".tsv")) return "table";
+  if (normalized.endsWith(".png") || normalized.endsWith(".jpg") || normalized.endsWith(".jpeg") || normalized.endsWith(".webp")) return "image";
+  if (normalized.endsWith(".ts") || normalized.endsWith(".tsx") || normalized.endsWith(".js") || normalized.endsWith(".jsx") || normalized.endsWith(".py")) return "code";
+  return "artifact";
+}
+
+function artifactTitleFromKey(key) {
+  const name = key.split("/").filter(Boolean).pop() || key;
+  return name.replace(/\\.[^.]+$/, "").replace(/[-_]+/g, " ");
+}
+
+function artifactVersionKey(key) {
+  const safeKey = encodeURIComponent(key);
+  return artifactVersionPrefix + safeKey + "/" + new Date().toISOString().replace(/[:.]/g, "-") + "-" + artifactTitleFromKey(key);
+}
+
+function artifactVersionCounts(objects) {
+  const counts = new Map();
+  for (const object of objects) {
+    if (!object.key.startsWith(artifactVersionPrefix)) continue;
+    const encodedKey = object.key.split("/")[1];
+    if (!encodedKey) continue;
+    const key = decodeURIComponent(encodedKey);
+    counts.set(key, (counts.get(key) || 1) + 1);
+  }
+  return counts;
+}
+
+async function artifactVersions(env, key) {
+  if (!env.AGENT_STORAGE) return [];
+  const prefix = artifactVersionPrefix + encodeURIComponent(key) + "/";
+  const list = await env.AGENT_STORAGE.list({ prefix, limit: 25 });
+  return [
+    { key, versionKey: key, label: "Current", current: true },
+    ...(list.objects || []).map((object, index) => ({
+      key,
+      versionKey: object.key,
+      label: "Revision " + String(index + 1),
+      uploaded: object.uploaded || null,
+      size: object.size || null
+    }))
+  ];
+}
+
+function contentTypeFromArtifactKey(key) {
+  const normalized = key.toLowerCase();
+  if (normalized.endsWith(".md")) return "text/markdown; charset=utf-8";
+  if (normalized.endsWith(".html") || normalized.endsWith(".htm")) return "text/html; charset=utf-8";
+  if (normalized.endsWith(".json")) return "application/json; charset=utf-8";
+  if (normalized.endsWith(".csv")) return "text/csv; charset=utf-8";
+  if (normalized.endsWith(".diff") || normalized.endsWith(".patch")) return "text/x-diff; charset=utf-8";
+  return "text/plain; charset=utf-8";
+}
+
+function normalizeBrowserViewport(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const viewport = {};
+  if (Number.isFinite(value.width)) viewport.width = Math.round(Number(value.width));
+  if (Number.isFinite(value.height)) viewport.height = Math.round(Number(value.height));
+  if (Number.isFinite(value.deviceScaleFactor)) viewport.deviceScaleFactor = Number(value.deviceScaleFactor);
+  return Object.keys(viewport).length > 0 ? viewport : undefined;
+}
+
+function defaultBrowserSnapshotArtifactKey(target, capturedAt) {
+  return normalizeArtifactKey(
+    "browser/" + slugify(browserArtifactTitle(target)) + "/" + capturedAt.replace(/[:.]/g, "-") + ".browser.json"
+  );
+}
+
+function browserArtifactTitle(target) {
+  try {
+    const parsed = new URL(target);
+    return parsed.hostname + parsed.pathname.replace(/\\/$/, "");
+  } catch {
+    return String(target || "snapshot").slice(0, 72);
+  }
+}
+
+function contributionCapabilityState(env) {
+  const config = remoteUpdateConfig(env);
+  return {
+    available: Boolean(env.OPEN_THINK_GITHUB_TOKEN),
+    endpoint: "/contributions",
+    repository: normalizeGithubRepository(config.repository),
+    baseBranch: normalizeGithubBranch(config.branch, "main"),
+    tokenConfigured: Boolean(env.OPEN_THINK_GITHUB_TOKEN),
+    artifactSourceAvailable: Boolean(env.AGENT_STORAGE),
+    sandboxSourceAvailable: false,
+    mode: "github-pull-request",
+    note: env.OPEN_THINK_GITHUB_TOKEN
+      ? "POST title, body, changes, or artifactKeys to open a pull request against the configured upstream."
+      : "Configure OPEN_THINK_GITHUB_TOKEN to let the agent open owner-approved upstream pull requests."
+  };
+}
+
+async function contributionChangesFromPayload(payload, env, source) {
+  const changes = [];
+  if (Array.isArray(payload.changes)) {
+    for (const item of payload.changes) {
+      if (!item || typeof item !== "object") continue;
+      const path = normalizeContributionPath(item.path);
+      const content = normalizeLongText(item.content ?? item.text, "");
+      if (path && content) changes.push({ path, content });
+    }
+  }
+
+  for (const keyValue of normalizeStringArray(payload.artifactKeys)) {
+    const key = normalizeArtifactKey(keyValue);
+    if (!key || !env.AGENT_STORAGE) continue;
+    const object = await env.AGENT_STORAGE.get(key);
+    if (!object) continue;
+    const content = await object.text();
+    if (artifactTypeFromKey(key) === "diff") {
+      changes.push(...await contributionChangesFromPatch(env, source.repository, source.baseBranch, content));
+      continue;
+    }
+    changes.push({
+      path: normalizeContributionPath(key) || key,
+      content
+    });
+  }
+
+  const diffArtifactKeys = [
+    ...normalizeStringArray(payload.diffArtifactKeys),
+    ...normalizeStringArray(payload.patchArtifactKeys)
+  ];
+  for (const keyValue of diffArtifactKeys) {
+    const key = normalizeArtifactKey(keyValue);
+    if (!key || !env.AGENT_STORAGE) continue;
+    const object = await env.AGENT_STORAGE.get(key);
+    if (!object) continue;
+    changes.push(...await contributionChangesFromPatch(env, source.repository, source.baseBranch, await object.text()));
+  }
+
+  return changes.slice(0, 20);
+}
+
+async function contributionChangesFromPatch(env, repository, baseBranch, patch) {
+  const files = parseUnifiedPatch(patch).filter((file) => file.newPath && file.oldPath);
+  if (files.length === 0 && String(patch || "").trim()) {
+    throw new Error("Patch artifact did not contain supported unified diff file changes.");
+  }
+  const changes = [];
+  for (const file of files.slice(0, 20)) {
+    const path = normalizeContributionPath(file.isDeleted ? file.oldPath : file.newPath);
+    if (!path) continue;
+    if (file.isDeleted) {
+      changes.push({ path, content: "", delete: true });
+      continue;
+    }
+    const baseContent = file.isNew
+      ? ""
+      : await readGithubContributionFileText(env, repository, baseBranch, normalizeContributionPath(file.oldPath));
+    changes.push({ path, content: applyUnifiedPatchToText(baseContent, file) });
+  }
+  return changes;
+}
+
+function parseUnifiedPatch(patch) {
+  const files = [];
+  let current = null;
+  let currentHunk = null;
+  for (const line of String(patch || "").split(/\\r?\\n/)) {
+    if (line.startsWith("GIT binary patch") || line.startsWith("Binary files ")) {
+      throw new Error("Binary patches are not supported by the GitHub contribution lane yet.");
+    }
+    const diffMatch = /^diff --git a\\/(.+) b\\/(.+)$/.exec(line);
+    if (diffMatch) {
+      current = {
+        oldPath: diffMatch[1] || "",
+        newPath: diffMatch[2] || "",
+        isNew: false,
+        isDeleted: false,
+        hunks: []
+      };
+      files.push(current);
+      currentHunk = null;
+      continue;
+    }
+    if (!current) continue;
+    if (line === "new file mode" || line.startsWith("new file mode ")) current.isNew = true;
+    if (line === "deleted file mode" || line.startsWith("deleted file mode ")) current.isDeleted = true;
+    if (line.startsWith("--- ")) {
+      const path = line.slice(4).trim();
+      if (path === "/dev/null") current.isNew = true;
+      else if (path.startsWith("a/")) current.oldPath = path.slice(2);
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const path = line.slice(4).trim();
+      if (path === "/dev/null") current.isDeleted = true;
+      else if (path.startsWith("b/")) current.newPath = path.slice(2);
+      continue;
+    }
+    const hunkMatch = /^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@/.exec(line);
+    if (hunkMatch) {
+      currentHunk = {
+        oldStart: Number(hunkMatch[1]),
+        oldCount: Number(hunkMatch[2] || 1),
+        newStart: Number(hunkMatch[3]),
+        newCount: Number(hunkMatch[4] || 1),
+        lines: []
+      };
+      current.hunks.push(currentHunk);
+      continue;
+    }
+    if (currentHunk && (line.startsWith(" ") || line.startsWith("+") || line.startsWith("-") || line.startsWith("\\\\"))) {
+      currentHunk.lines.push(line);
+    }
+  }
+  return files;
+}
+
+async function readGithubContributionFileText(env, repository, baseBranch, path) {
+  const file = await githubContributionRequest(
+    env,
+    repository,
+    "/contents/" + path.split("/").map(encodeURIComponent).join("/") + "?ref=" + encodeURIComponent(baseBranch),
+    { allowNotFound: true }
+  );
+  const encoded = typeof file.content === "string" ? file.content : "";
+  return encoded ? base64DecodeUtf8(encoded.replace(/\\s+/g, "")) : "";
+}
+
+function applyUnifiedPatchToText(baseContent, patchFile) {
+  const baseLines = splitPatchTextLines(baseContent);
+  const output = [];
+  let cursor = 0;
+  for (const hunk of patchFile.hunks) {
+    const hunkStart = Math.max(0, hunk.oldStart - 1);
+    output.push(...baseLines.slice(cursor, hunkStart));
+    cursor = hunkStart;
+    for (const line of hunk.lines) {
+      if (line.startsWith("\\\\")) continue;
+      const kind = line[0];
+      const value = line.slice(1);
+      if (kind === " ") {
+        output.push(baseLines[cursor] ?? value);
+        cursor += 1;
+      } else if (kind === "-") {
+        cursor += 1;
+      } else if (kind === "+") {
+        output.push(value);
+      }
+    }
+  }
+  output.push(...baseLines.slice(cursor));
+  const text = output.join("\\n");
+  return String(baseContent || "").endsWith("\\n") || patchFile.isNew ? text + "\\n" : text;
+}
+
+function splitPatchTextLines(text) {
+  if (!text) return [];
+  const lines = String(text).replace(/\\r\\n/g, "\\n").replace(/\\r/g, "\\n").split("\\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+async function createGithubContributionPullRequest(env, input) {
+  const baseRef = await githubContributionRequest(env, input.repository, "/git/ref/heads/" + encodeURIComponent(input.baseBranch));
+  const baseSha = String(baseRef?.object?.sha || "");
+  if (!baseSha) throw new Error("GitHub base branch did not return a commit SHA.");
+
+  await githubContributionRequest(env, input.repository, "/git/refs", {
+    method: "POST",
+    body: JSON.stringify({
+      ref: "refs/heads/" + input.branchName,
+      sha: baseSha
+    })
+  });
+
+  for (const change of input.changes) {
+    const encodedPath = change.path.split("/").map(encodeURIComponent).join("/");
+    const currentFile = await githubContributionRequest(
+      env,
+      input.repository,
+      "/contents/" + encodedPath + "?ref=" + encodeURIComponent(input.baseBranch),
+      { allowNotFound: true }
+    );
+    if (change.delete) {
+      if (!currentFile?.sha) continue;
+      await githubContributionRequest(env, input.repository, "/contents/" + encodedPath, {
+        method: "DELETE",
+        body: JSON.stringify({
+          message: "OpenThink agent contribution: " + input.title,
+          sha: currentFile.sha,
+          branch: input.branchName
+        })
+      });
+      continue;
+    }
+    const body = {
+      message: "OpenThink agent contribution: " + input.title,
+      content: base64EncodeUtf8(change.content),
+      branch: input.branchName
+    };
+    if (currentFile?.sha) body.sha = currentFile.sha;
+    await githubContributionRequest(env, input.repository, "/contents/" + encodedPath, {
+      method: "PUT",
+      body: JSON.stringify(body)
+    });
+  }
+
+  return githubContributionRequest(env, input.repository, "/pulls", {
+    method: "POST",
+    body: JSON.stringify({
+      title: input.title,
+      head: input.branchName,
+      base: input.baseBranch,
+      body: input.body
+    })
+  });
+}
+
+async function githubContributionRequest(env, repository, path, init = {}) {
+  const response = await fetch("https://api.github.com/repos/" + repository + path, {
+    ...init,
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: "Bearer " + env.OPEN_THINK_GITHUB_TOKEN,
+      "Content-Type": "application/json",
+      "User-Agent": "open-think-agent",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(init.headers || {})
+    }
+  });
+  const body = await response.json().catch(() => ({}));
+  if (init.allowNotFound && response.status === 404) return {};
+  if (!response.ok) throw new Error(String(body.message || "GitHub API failed with " + response.status));
+  return body;
+}
+
+async function recordContributionPullRequest(env, input) {
+  if (!env.DB) return;
+  await env.DB.prepare(
+    "create table if not exists contribution_pull_requests (id text primary key, title text not null, branch_name text not null, url text not null, status text not null, created_at text not null)"
+  ).run();
+  await env.DB.prepare(
+    "insert into contribution_pull_requests (id, title, branch_name, url, status, created_at) values (?, ?, ?, ?, ?, ?)"
+  ).bind(input.id, input.title, input.branchName, String(input.url || ""), input.status, input.createdAt).run().catch(() => undefined);
+}
+
+function normalizeGithubRepository(value) {
+  const repository = String(value || defaultUpdateRepository).trim();
+  return /^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+$/.test(repository) ? repository : defaultUpdateRepository;
+}
+
+function normalizeGithubBranch(value, fallback) {
+  const raw = String(value || "").trim();
+  const branch = raw.startsWith("refs/heads/") ? raw.slice("refs/heads/".length) : raw;
+  if (!branch || branch.includes("..") || branch.startsWith("/") || branch.endsWith("/")) return fallback;
+  return branch.replace(/[^A-Za-z0-9/_.,=+@-]+/g, "-").slice(0, 120);
+}
+
+function normalizeContributionPath(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/^[/]+/, "")
+    .replace(/[.][.]+/g, ".")
+    .replace(/[^a-zA-Z0-9/_.,=+@ -]+/g, "-")
+    .slice(0, 240);
+}
+
+function slugify(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "change";
+}
+
+function base64EncodeUtf8(value) {
+  const bytes = new TextEncoder().encode(String(value || ""));
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.slice(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function base64DecodeUtf8(value) {
+  const binary = atob(String(value || ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 function html(markup) {

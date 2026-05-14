@@ -7,6 +7,7 @@ import type {
   AutomationSnapshot,
   DeploymentEvent,
   DeploymentFlow,
+  DeploymentStatus,
   DeploymentRequest,
   DeploymentResource
 } from "@/lib/deployment-engine";
@@ -68,18 +69,40 @@ export function DeployConsole() {
 
       if (!response.ok || !response.body) {
         const body = (await response.json().catch(() => null)) as
-          | { error?: string }
+          | { deploymentId?: string; error?: string }
           | null;
+        if (body?.deploymentId) setDeploymentId(body.deploymentId);
         throw new Error(body?.error ?? "Deployment stream failed.");
       }
 
-      setDeploymentId(response.headers.get("X-Deployment-Id"));
+      const responseDeploymentId = response.headers.get("X-Deployment-Id");
+      let receivedEvents: DeploymentEvent[] = [];
+      setDeploymentId(responseDeploymentId);
       setAgentUrl(response.headers.get("X-Agent-Url"));
       await readSse(response.body, (event) => {
-        setEvents((current) => [...current, event]);
+        receivedEvents = mergeDeploymentEvent(receivedEvents, event);
+        setEvents(receivedEvents);
+        if (event.agentUrl) setAgentUrl(event.agentUrl);
         if (event.automation) setAutomation(event.automation);
         if (event.resources) setResources(event.resources);
       });
+
+      if (responseDeploymentId && !hasTerminalDeploymentEvent(receivedEvents)) {
+        await pollDeploymentStatus(responseDeploymentId, {
+          onStatus(payload) {
+            if (payload.agentUrl) setAgentUrl(payload.agentUrl);
+            const resourcesFromPlan = resourcePlanToResources(payload.resourcePlan);
+            if (resourcesFromPlan.length > 0) setResources(resourcesFromPlan);
+          },
+          onEvent(event) {
+            receivedEvents = mergeDeploymentEvent(receivedEvents, event);
+            setEvents(receivedEvents);
+            if (event.agentUrl) setAgentUrl(event.agentUrl);
+            if (event.automation) setAutomation(event.automation);
+            if (event.resources) setResources(event.resources);
+          }
+        });
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Deployment failed.");
     } finally {
@@ -168,6 +191,14 @@ export function DeployConsole() {
       </div>
     </section>
   );
+}
+
+interface DeploymentStatusPayload {
+  deploymentId: string;
+  status: DeploymentStatus;
+  agentUrl: string;
+  events: DeploymentEvent[];
+  resourcePlan?: Record<string, unknown>;
 }
 
 function FuturePathway({
@@ -279,4 +310,99 @@ async function readSse(
       if ("id" in parsed) onEvent(parsed);
     }
   }
+}
+
+async function pollDeploymentStatus(
+  deploymentId: string,
+  handlers: {
+    onStatus(payload: DeploymentStatusPayload): void;
+    onEvent(event: DeploymentEvent): void;
+  }
+) {
+  const maxAttempts = 300;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const response = await fetch(`/api/deployment/status/${encodeURIComponent(deploymentId)}`, {
+      cache: "no-store"
+    });
+
+    if (response.ok) {
+      const payload = (await response.json()) as DeploymentStatusPayload;
+      handlers.onStatus(payload);
+      for (const event of payload.events ?? []) {
+        handlers.onEvent(event);
+      }
+      if (payload.status === "ready" || payload.status === "failed") {
+        return;
+      }
+    }
+
+    await delay(2000);
+  }
+
+  throw new Error("Deployment is still running. Refresh deployment status to continue tracking it.");
+}
+
+function mergeDeploymentEvent(
+  events: DeploymentEvent[],
+  event: DeploymentEvent
+): DeploymentEvent[] {
+  const existingIndex = events.findIndex((item) => item.id === event.id);
+  if (existingIndex === -1) return [...events, event];
+  const next = [...events];
+  next[existingIndex] = event;
+  return next;
+}
+
+function hasTerminalDeploymentEvent(events: DeploymentEvent[]): boolean {
+  return events.some((event) => event.id === "ready" || event.status === "error");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resourcePlanToResources(plan: Record<string, unknown> | undefined): DeploymentResource[] {
+  if (!plan) return [];
+  const scriptName = textField(plan, "scriptName");
+  const workerDeployment = recordField(plan, "workerDeployment");
+  const d1Database = recordField(plan, "d1Database");
+  const r2Bucket = recordField(plan, "r2Bucket");
+  const vectorizeIndex = recordField(plan, "vectorizeIndex");
+  const queue = recordField(plan, "queue");
+  const resources: DeploymentResource[] = [];
+
+  if (scriptName) resources.push({ type: "Worker", name: scriptName });
+  const accessApplicationId = textField(workerDeployment, "accessApplicationId");
+  if (accessApplicationId) {
+    resources.push({
+      type: "Access",
+      name: accessApplicationId,
+      binding: "Cloudflare Access"
+    });
+  }
+  const d1Name = textField(d1Database, "name");
+  if (d1Name) resources.push({ type: "D1", name: d1Name, binding: "DB" });
+  const r2Name = textField(r2Bucket, "name");
+  if (r2Name) resources.push({ type: "R2", name: r2Name, binding: "AGENT_STORAGE" });
+  const vectorizeName = textField(vectorizeIndex, "name");
+  if (vectorizeName) {
+    resources.push({ type: "Vectorize", name: vectorizeName, binding: "VECTORIZE" });
+  }
+  const queueName = textField(queue, "name");
+  if (queueName) resources.push({ type: "Queue", name: queueName, binding: "TASK_QUEUE" });
+
+  return resources;
+}
+
+function recordField(record: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = record[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function textField(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
 }

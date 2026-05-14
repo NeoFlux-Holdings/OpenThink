@@ -24,6 +24,11 @@ import { CloudflareApiClient } from "./cloudflare-api";
 import type { DeploymentRecord, DeploymentRepository } from "./d1";
 import type { DeploymentRequest } from "./deployment-engine";
 import { readEnvString } from "./platform-env";
+import {
+  readOpenThinkUpdateBranch,
+  readOpenThinkUpdateBundlePath,
+  readOpenThinkUpdateRepository
+} from "./update-source";
 
 export type DeploymentUpdateAction =
   | Extract<SyncAction, "pull" | "deploy" | "reconcile">
@@ -512,9 +517,8 @@ async function resolveGithubUpdateState(
   env: Record<string, unknown>,
   metadata?: DeploymentUpdateMetadata
 ): Promise<GithubUpdateState> {
-  const repository =
-    readEnvString(env, "OPEN_THINK_UPDATE_REPOSITORY") ?? "NeoFlux-Holdings/OpenThink";
-  const branch = readEnvString(env, "OPEN_THINK_UPDATE_BRANCH") ?? metadata?.branch ?? "main";
+  const repository = readOpenThinkUpdateRepository(env);
+  const branch = readOpenThinkUpdateBranch(env, metadata?.branch ?? "main");
   const remoteUrl = `https://github.com/${repository}`;
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
@@ -1239,13 +1243,10 @@ function buildWorkspaceCapabilityPlan(
   metadata?: DeploymentUpdateMetadata
 ): DeploymentWorkspaceCapabilityPlan {
   const workspace = readDeploymentWorkspaceMetadata(resourcePlan);
-  const repository =
-    readEnvString(env, "OPEN_THINK_UPDATE_REPOSITORY") ?? "NeoFlux-Holdings/OpenThink";
+  const repository = readOpenThinkUpdateRepository(env);
   const branch =
     metadata?.branch ??
-    readEnvString(env, "OPEN_THINK_UPDATE_BRANCH") ??
-    workspace?.artifact?.defaultBranch ??
-    "main";
+    readOpenThinkUpdateBranch(env, workspace?.artifact?.defaultBranch ?? "main");
   const configured = Boolean(workspace?.artifact?.remote);
   const artifacts: DeploymentWorkspaceCapabilityPlan["artifacts"] = {
     status: configured ? "configured" : "upgradeable",
@@ -1382,10 +1383,9 @@ function buildDeploymentUpdateMetadata(input: {
     lastAction: input.action,
     updatedAt: new Date().toISOString()
   };
-  const updateRepository =
-    readEnvString(input.env, "OPEN_THINK_UPDATE_REPOSITORY") ?? "NeoFlux-Holdings/OpenThink";
+  const updateRepository = readOpenThinkUpdateRepository(input.env);
   const remoteUrl = input.status?.remoteUrl ?? `https://github.com/${updateRepository}`;
-  const branch = input.status?.branch ?? readEnvString(input.env, "OPEN_THINK_UPDATE_BRANCH");
+  const branch = input.status?.branch ?? readOpenThinkUpdateBranch(input.env);
 
   if (input.result?.message) metadata.lastMessage = input.result.message;
   if (input.error) metadata.lastError = input.error;
@@ -1463,9 +1463,9 @@ function buildWorkerUploadMetadata(
     ? normalizePersonalAgentConfig(personalAgentOverride)
     : readPersonalAgentConfig(resourcePlan, env, factoryDefaults);
   const updateRepository =
-    readEnvString(env, "OPEN_THINK_UPDATE_REPOSITORY") ?? "NeoFlux-Holdings/OpenThink";
-  const updateBranch = readEnvString(env, "OPEN_THINK_UPDATE_BRANCH") ?? "main";
-  const updateBundlePath = readEnvString(env, "OPEN_THINK_UPDATE_BUNDLE_PATH") ?? "dist/worker.js";
+    readOpenThinkUpdateRepository(env);
+  const updateBranch = readOpenThinkUpdateBranch(env);
+  const updateBundlePath = readOpenThinkUpdateBundlePath(env);
   const compatibilityFlags = Array.isArray(wrangler?.compatibility_flags)
     ? wrangler.compatibility_flags.filter((flag): flag is string => typeof flag === "string")
     : ["nodejs_compat", "global_fetch_strictly_public"];
