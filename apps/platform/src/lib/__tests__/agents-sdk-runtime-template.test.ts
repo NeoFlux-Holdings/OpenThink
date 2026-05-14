@@ -210,7 +210,10 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(source).toContain("isEmptyTextPart");
     expect(source).toContain("activeApprovalContinuationIndex");
     expect(source).toContain("ignoreIncompleteToolCalls: true");
+    expect(source).toContain("suppressToolInputStreamingTransform");
+    expect(source).toContain('part.type === "tool-input-start" || part.type === "tool-input-delta"');
     expect(source).not.toContain("pruneMessages");
+    expect(source).toContain("experimental_transform: suppressToolInputStreamingTransform()");
     expect(source).toContain("stopWhen: stepCountIs(5)");
     expect(source).toContain("toUIMessageStreamResponse({ sendReasoning: false })");
     expect(source).toContain('transport: "websocket"');

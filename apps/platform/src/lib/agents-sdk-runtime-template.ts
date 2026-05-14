@@ -3143,6 +3143,8 @@ import {
   streamText,
   tool,
   type StreamTextOnFinishCallback,
+  type StreamTextTransform,
+  type TextStreamPart,
   type ToolSet,
   type UIMessage
 } from "ai";
@@ -3228,6 +3230,16 @@ const cloudflareMcpServerUrl = "https://mcp.cloudflare.com/mcp";
 
 async function prepareModelMessages(messages: UIMessage[]) {
   return convertToModelMessages(sanitizeMessagesForModel(messages), { ignoreIncompleteToolCalls: true });
+}
+
+function suppressToolInputStreamingTransform<TOOLS extends ToolSet>(): StreamTextTransform<TOOLS> {
+  return () =>
+    new TransformStream<TextStreamPart<TOOLS>, TextStreamPart<TOOLS>>({
+      transform(part, controller) {
+        if (part.type === "tool-input-start" || part.type === "tool-input-delta") return;
+        controller.enqueue(part);
+      }
+    });
 }
 
 function sanitizeMessagesForModel(messages: UIMessage[]): UIMessage[] {
@@ -3428,6 +3440,7 @@ export class PersonalChatAgent extends AIChatAgent<RuntimeEnv> {
         ...this.mcpToolsWithApprovalPolicy(),
         ...this.builtinTools()
       },
+      experimental_transform: suppressToolInputStreamingTransform(),
       stopWhen: stepCountIs(5),
       ...(options?.abortSignal ? { abortSignal: options.abortSignal } : {}),
       onFinish
