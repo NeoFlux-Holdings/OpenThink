@@ -59,7 +59,6 @@ function Chat() {
   const [pendingAssistantMessage, setPendingAssistantMessage] = useState<PendingAssistantMessage | null>(null);
   const [emptyResponseMessage, setEmptyResponseMessage] = useState<string | null>(null);
   const autoApprovedApprovalIdsRef = useRef<Set<string>>(new Set());
-  const emptyResponseRetrySignaturesRef = useRef<Set<string>>(new Set());
   const pendingManualContinuationRef = useRef(false);
   const toolContinuationAttemptSignaturesRef = useRef<Set<string>>(new Set());
   const sessionTurnStartIndexRef = useRef<number | null>(null);
@@ -122,7 +121,8 @@ function Chat() {
   const visibleMessages = useMemo(() => compactVisibleMessages(messages, activeApprovalIds), [messages, activeApprovalIds]);
   const pendingApprovalCount = approvalToolCallIds.size;
   const approvalErrorMessage = formatChatErrorMessage(error);
-  const chatErrorMessage = approvalErrorMessage ?? emptyResponseMessage;
+  const visibleEmptyResponseMessage = busy ? null : emptyResponseMessage;
+  const chatErrorMessage = approvalErrorMessage ?? visibleEmptyResponseMessage;
   const retryIsSafe = !isProtocolRecoveryError(error);
   const canRetry =
     connected &&
@@ -190,34 +190,9 @@ function Chat() {
     if (!pendingAssistantMessage || busy || !connected || error || pendingApprovalCount > 0) return;
     if (messagesContainRenderableAssistantAfter(messages, pendingAssistantMessage.startIndex, sessionApprovalIds)) return;
 
-    const retryTarget = latestUserTextMessageAfter(messages, pendingAssistantMessage.startIndex);
-    if (!retryTarget) {
-      setPendingAssistantMessage(null);
-      setEmptyResponseMessage("No assistant output was received. Send the request again if needed.");
-      return;
-    }
-
-    const retrySignature = retryTarget.id + ":" + retryTarget.text;
-    if (emptyResponseRetrySignaturesRef.current.has(retrySignature)) {
-      setPendingAssistantMessage(null);
-      setEmptyResponseMessage("No assistant output was received. Retry the last message when ready.");
-      return;
-    }
-
-    const retryTimer = window.setTimeout(() => {
-      if (agent.readyState !== WebSocket.OPEN) return;
-      emptyResponseRetrySignaturesRef.current.add(retrySignature);
-      setEmptyResponseMessage(null);
-      stickToBottomRef.current = true;
-      void Promise.resolve(sendMessage({ text: retryTarget.text, messageId: retryTarget.id })).catch((retryError: unknown) => {
-        console.error("[useAgentChat] Empty response retry failed", retryError);
-        setPendingAssistantMessage(null);
-        setEmptyResponseMessage("No assistant output was received, and the automatic retry failed. Retry the last message when ready.");
-      });
-    }, 900);
-
-    return () => window.clearTimeout(retryTimer);
-  }, [agent.readyState, busy, connected, error, messages, pendingAssistantMessage, pendingApprovalCount, sendMessage, sessionApprovalIds]);
+    setPendingAssistantMessage(null);
+    setEmptyResponseMessage("No assistant output was received. Retry the last message when ready.");
+  }, [busy, connected, error, messages, pendingAssistantMessage, pendingApprovalCount, sessionApprovalIds]);
 
   useEffect(() => {
     if (!connected || pendingApprovalCount > 0 || hasUnsettledToolInput(messages)) return;
@@ -331,7 +306,6 @@ function Chat() {
       setPendingUserMessage(null);
       setPendingAssistantMessage(null);
       setEmptyResponseMessage(null);
-      emptyResponseRetrySignaturesRef.current.clear();
       clearHistory();
     }
   }
@@ -342,8 +316,14 @@ function Chat() {
     setEmptyResponseMessage(null);
     const retryTarget = latestUserTextMessageAfter(messages, 0);
     if (retryTarget) {
-      emptyResponseRetrySignaturesRef.current.delete(retryTarget.id + ":" + retryTarget.text);
       setPendingAssistantMessage({ startIndex: retryTarget.index });
+      stickToBottomRef.current = true;
+      void Promise.resolve(sendMessage({ text: retryTarget.text, messageId: retryTarget.id })).catch((retryError: unknown) => {
+        console.error("[useAgentChat] Retry failed", retryError);
+        setPendingAssistantMessage(null);
+        setEmptyResponseMessage("Retry failed. Send the request again if needed.");
+      });
+      return;
     }
     stickToBottomRef.current = true;
     void Promise.resolve(regenerate()).catch((retryError: unknown) => {
@@ -749,6 +729,7 @@ function ToolPartGroup({
   respondToToolApproval: (approvalId: string | undefined, toolCallId: string | undefined, approved: boolean) => boolean;
 }) {
   const summary = summarizeToolGroup(parts, activeApprovalIds);
+  const renderDetails = summary.defaultOpen || summary.state !== "streaming";
 
   return (
     <details className="tool-group" data-state={summary.state} open={summary.defaultOpen ? true : undefined}>
@@ -763,7 +744,7 @@ function ToolPartGroup({
         </span>
       </summary>
       <div className="tool-group-details">
-        {parts.map(({ part, index }) => (
+        {renderDetails ? parts.map(({ part, index }) => (
           <MessagePart
             activeApprovalIds={activeApprovalIds}
             approveToolAlways={approveToolAlways}
@@ -771,7 +752,7 @@ function ToolPartGroup({
             part={part}
             respondToToolApproval={respondToToolApproval}
           />
-        ))}
+        )) : <p className="tool-note">Details are available when this tool call settles.</p>}
       </div>
     </details>
   );
@@ -1736,6 +1717,9 @@ function formatChatErrorMessage(error: Error | undefined) {
   if (error.message.includes("for missing text part") || error.message.includes("for missing reasoning part")) {
     return "The stream sent an out-of-order protocol chunk. Dismiss this notice and send the next message when ready.";
   }
+  if (error.message.includes("Maximum update depth exceeded")) {
+    return "The stream hit a React rendering guard. Stop the current run or send the request again when the stream is idle.";
+  }
   return error.message;
 }
 
@@ -1747,6 +1731,7 @@ function isProtocolRecoveryError(error: Error | undefined) {
     message.includes("Tool approval response references unknown approvalId") ||
     message.includes("for missing text part") ||
     message.includes("for missing reasoning part") ||
+    message.includes("Maximum update depth exceeded") ||
     message.includes("Cannot read properties of undefined (reading 'state')")
   );
 }
