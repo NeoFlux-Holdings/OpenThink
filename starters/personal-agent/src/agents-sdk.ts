@@ -202,7 +202,7 @@ function suppressToolInputStreamingTransform<TOOLS extends ToolSet>(): StreamTex
 function sanitizeMessagesForModel(messages: UIMessage[]): UIMessage[] {
   const activeApprovalIndex = activeApprovalContinuationIndex(messages);
 
-  return messages
+  const strippedMessages = messages
     .map((message, messageIndex) => {
       const shouldKeepToolParts = messageIndex === activeApprovalIndex;
       if (shouldKeepToolParts || !message.parts.some(isToolUIPart)) return stripEmptyTextParts(message);
@@ -213,6 +213,8 @@ function sanitizeMessagesForModel(messages: UIMessage[]): UIMessage[] {
       } as UIMessage;
     })
     .filter((message) => message.role === "user" || message.parts.length > 0);
+
+  return mergeAdjacentUserMessages(strippedMessages);
 }
 
 function stripEmptyTextParts(message: UIMessage): UIMessage {
@@ -224,6 +226,39 @@ function stripEmptyTextParts(message: UIMessage): UIMessage {
 
 function isEmptyTextPart(part: UIMessage["parts"][number]) {
   return isTextUIPart(part) && part.text.trim().length === 0;
+}
+
+function mergeAdjacentUserMessages(messages: UIMessage[]): UIMessage[] {
+  const merged: UIMessage[] = [];
+  for (const message of messages) {
+    const previous = merged[merged.length - 1];
+    if (previous?.role === "user" && message.role === "user") {
+      merged[merged.length - 1] = mergeUserMessages(previous, message);
+      continue;
+    }
+    merged.push(message);
+  }
+  return merged;
+}
+
+function mergeUserMessages(left: UIMessage, right: UIMessage): UIMessage {
+  const text = [textPartContent(left.parts), textPartContent(right.parts)].filter(Boolean).join("\n\n");
+  const nonTextParts = [...left.parts, ...right.parts].filter((part) => !isTextUIPart(part));
+  return {
+    ...right,
+    parts: [
+      ...(text ? [{ type: "text", text } as UIMessage["parts"][number]] : []),
+      ...nonTextParts
+    ]
+  } as UIMessage;
+}
+
+function textPartContent(parts: UIMessage["parts"]) {
+  return parts
+    .filter(isTextUIPart)
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function activeApprovalContinuationIndex(messages: UIMessage[]) {
@@ -371,6 +406,8 @@ export class PersonalChatAgent extends AIChatAgent<RuntimeEnv> {
       system: [
         `You are ${env.OPEN_THINK_AGENT_NAME ?? "Personal Agent"}, an open-think personal agent running on Cloudflare Agents SDK.`,
         "Use the native AIChatAgent chat protocol for resumable WebSocket streaming and SQLite message persistence.",
+        "If several user messages are queued without an assistant answer, treat them as one latest turn and answer the newest actionable request first.",
+        "Do not continue stale deployment or tool work unless the newest user message explicitly asks you to continue it.",
         cloudAgentInstanceInstruction(env),
         goalCommandInstruction(),
         "You can create, brief, pause, resume, archive, summarize, and message Cloud Agent Instance sub-agents through built-in sub-agent tools when the owner asks for delegated work.",
