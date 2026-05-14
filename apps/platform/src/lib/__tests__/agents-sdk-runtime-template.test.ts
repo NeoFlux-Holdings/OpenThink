@@ -108,6 +108,10 @@ describe("renderAgentsSdkPersonalAgentRuntime", () => {
     expect(client).toContain("ToolPartGroup");
     expect(client).toContain("messageRenderBlocks");
     expect(client).toContain("summarizeToolGroup");
+    expect(client).toContain("summarizeToolPart");
+    expect(client).toContain("toolDisplayTitle");
+    expect(client).toContain("Search Cloudflare docs");
+    expect(client).toContain("Raw details");
     expect(client).toContain('className="tool-group"');
     expect(client).toContain("open={summary.defaultOpen ? true : undefined}");
     expect(client).toContain('summary.state !== "streaming"');

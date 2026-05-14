@@ -384,8 +384,7 @@ button {
 
 .tool-group-title strong {
   overflow-wrap: anywhere;
-  font-family: var(--mono);
-  font-size: 0.82rem;
+  font-size: 0.95rem;
 }
 
 .tool-group-title small {
@@ -445,11 +444,73 @@ button {
   justify-content: space-between;
 }
 
-.tool-heading strong {
+.tool-summary-copy {
+  display: grid;
+  min-width: min(100%, 320px);
+  flex: 1 1 320px;
+  gap: 4px;
+}
+
+.tool-summary-copy strong {
   min-width: 0;
   overflow-wrap: anywhere;
+  font-size: 0.96rem;
+}
+
+.tool-summary-copy p {
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+
+.tool-inline-code {
+  width: fit-content;
+  border: 1px solid rgba(189, 180, 165, 0.68);
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+  color: var(--muted);
+  background: rgba(255, 252, 245, 0.72);
   font-family: var(--mono);
-  font-size: 0.82rem;
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.tool-outcome {
+  color: var(--ink);
+}
+
+.tool-raw-details {
+  border-top: 1px solid rgba(189, 180, 165, 0.7);
+  padding-top: 8px;
+}
+
+.tool-raw-details > summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  list-style: none;
+  text-transform: uppercase;
+}
+
+.tool-raw-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-raw-details > summary::before {
+  content: "+";
+  margin-right: 6px;
+}
+
+.tool-raw-details[open] > summary::before {
+  content: "-";
+}
+
+.tool-raw-section {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
 }
 
 .tool-actions {

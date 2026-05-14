@@ -772,7 +772,7 @@ function ToolPartGroup({
           <small>{summary.detail}</small>
         </span>
         <span className="tool-group-meta">
-          <span className="pill" data-state={summary.state}>{summary.state}</span>
+          <span className="pill" data-state={summary.state}>{toolStateLabel(summary.state)}</span>
           <span className="tool-group-toggle">Details</span>
         </span>
       </summary>
@@ -825,14 +825,19 @@ function MessagePart({
     const displayState = toolPartDisplayState(part, activeApprovalIds);
     const canRespondToApproval = Boolean(approval?.id && toolCallId && approvalIsActive);
     const showToolPayload = displayState !== "expired-approval";
+    const presentation = summarizeToolPart(part, activeApprovalIds);
+    const hasRawPayload = showToolPayload && (Boolean(input) || Boolean(output));
 
     return (
       <div className="tool-part" data-state={displayState}>
         <div className="tool-heading">
-          <strong>{toolName}</strong>
-          <span className="pill" data-state={displayState}>{displayState}</span>
+          <div className="tool-summary-copy">
+            <strong>{presentation.title}</strong>
+            {presentation.description ? <p>{presentation.description}</p> : null}
+            {presentation.outcome ? <p className="tool-outcome">{presentation.outcome}</p> : null}
+          </div>
+          <span className="pill" data-state={displayState}>{toolStateLabel(displayState)}</span>
         </div>
-        {input && showToolPayload ? <pre>{formatJson(input)}</pre> : null}
         {state === "waiting-approval" && approvalIsActive ? (
           <>
             <p className="tool-note">
@@ -874,11 +879,26 @@ function MessagePart({
           </p>
         ) : null}
         {state === "denied" ? <p className="tool-note">Rejected by owner.</p> : null}
-        {output && showToolPayload ? (
-          <>
-            <span className="tool-output-label">Output</span>
-            <pre>{formatJson(output)}</pre>
-          </>
+        {hasRawPayload ? (
+          <details className="tool-raw-details">
+            <summary>Raw details</summary>
+            <div className="tool-raw-section">
+              <span className="tool-output-label">Tool</span>
+              <code className="tool-inline-code">{presentation.rawName}</code>
+            </div>
+            {input ? (
+              <div className="tool-raw-section">
+                <span className="tool-output-label">Input</span>
+                <pre>{formatJson(input)}</pre>
+              </div>
+            ) : null}
+            {output ? (
+              <div className="tool-raw-section">
+                <span className="tool-output-label">Output</span>
+                <pre>{formatJson(output)}</pre>
+              </div>
+            ) : null}
+          </details>
         ) : null}
       </div>
     );
@@ -1601,13 +1621,15 @@ function messageRenderBlocks(parts: MessagePartEntry[]): MessageRenderBlock[] {
 }
 
 function summarizeToolGroup(parts: MessagePartEntry[], activeApprovalIds: ReadonlySet<string>) {
-  const names = uniqueToolNames(parts);
+  const summaries = parts.map(({ part }) => summarizeToolPart(part, activeApprovalIds));
+  const names = uniqueDisplayNames(summaries.map((summary) => summary.title));
   const states = parts.map(({ part }) => toolSummaryState(part, activeApprovalIds));
   const activeApprovalCount = parts.filter(({ part }) => toolPartHasActiveApproval(part, activeApprovalIds)).length;
   const state = toolGroupState(states, activeApprovalCount);
-  const countLabel = parts.length === 1 ? "1 tool call" : parts.length + " tool calls";
-  const title = parts.length === 1 ? names[0] ?? "Tool call" : countLabel;
-  const detailParts = [parts.length === 1 ? null : formatToolNameList(names), formatToolStateList(states)].filter(Boolean);
+  const countLabel = parts.length === 1 ? "1 tool step" : parts.length + " tool steps";
+  const title = parts.length === 1 ? summaries[0]?.title ?? "Tool step" : countLabel;
+  const detailParts = [parts.length === 1 ? summaries[0]?.description : formatToolNameList(names), formatToolStateList(states)]
+    .filter(Boolean);
 
   return {
     defaultOpen: activeApprovalCount > 0,
@@ -1617,8 +1639,32 @@ function summarizeToolGroup(parts: MessagePartEntry[], activeApprovalIds: Readon
   };
 }
 
-function uniqueToolNames(parts: MessagePartEntry[]) {
-  return Array.from(new Set(parts.flatMap(({ part }) => (isToolUIPart(part) ? [getToolName(part)] : [])).filter(Boolean)));
+type ToolPresentation = {
+  rawName: string;
+  title: string;
+  description: string | null;
+  outcome: string | null;
+};
+
+function summarizeToolPart(part: UIMessage["parts"][number], activeApprovalIds: ReadonlySet<string>): ToolPresentation {
+  const toolName = isToolUIPart(part) ? getToolName(part) : "tool";
+  const input = isToolUIPart(part) ? getToolInput(part) : null;
+  const output = isToolUIPart(part) ? getToolOutput(part) : null;
+  const displayState = isToolUIPart(part) ? toolPartDisplayState(part, activeApprovalIds) : "tool";
+  const title = toolDisplayTitle(toolName, input);
+  const description = toolInputSummary(toolName, input);
+  const outcome = toolOutcomeSummary(displayState, output);
+
+  return {
+    rawName: toolName,
+    title,
+    description: description && description !== title ? description : null,
+    outcome
+  };
+}
+
+function uniqueDisplayNames(names: string[]) {
+  return Array.from(new Set(names.filter(Boolean)));
 }
 
 function formatToolNameList(names: string[]) {
@@ -1632,6 +1678,263 @@ function formatToolStateList(states: string[]) {
   return Array.from(counts.entries())
     .map(([state, count]) => (count === 1 ? state : String(count) + " " + state))
     .join(", ");
+}
+
+function toolStateLabel(state: string) {
+  switch (state) {
+    case "complete":
+    case "output-available":
+      return "Complete";
+    case "streaming":
+    case "input-streaming":
+    case "input-available":
+      return "Running";
+    case "waiting-approval":
+      return "Needs approval";
+    case "approved":
+    case "approval-responded":
+      return "Approved";
+    case "expired-approval":
+      return "Expired";
+    case "output-error":
+    case "error":
+      return "Error";
+    case "denied":
+      return "Rejected";
+    default:
+      return titleCaseWords(state.replace(/-/g, " "));
+  }
+}
+
+function toolDisplayTitle(toolName: string, input: unknown) {
+  const normalized = normalizeToolName(toolName);
+  const codeTask = codeTaskSummary(input);
+
+  if (normalized === "search_cloudflare_documentation") return "Search Cloudflare docs";
+  if (normalized === "confirmCloudflareOperation") return "Request Cloudflare approval";
+  if (normalized === "setActiveGoal") return "Set active goal";
+  if (normalized === "getUserTimezone") return "Read browser time context";
+  if (normalized === "createSubAgent") return "Create sub-agent";
+  if (normalized === "sendSubAgentMessage") return "Message sub-agent";
+  if (normalized === "summarizeSubAgent") return "Summarize sub-agent";
+  if (normalized === "controlSubAgent") return "Control sub-agent";
+  if (normalized === "search") return codeTask ? "Inspect API shape" : "Search available tools";
+  if (normalized === "execute") return codeTask ? "Run Cloudflare operation" : "Execute tool";
+
+  return titleCaseWords(normalized.replace(/[_-]/g, " "));
+}
+
+function toolInputSummary(toolName: string, input: unknown) {
+  const normalized = normalizeToolName(toolName);
+  const inputRecord = asRecord(input);
+  if (!inputRecord) return null;
+
+  const query = textField(inputRecord, "query");
+  if (query) return "Query: " + truncateText(query, 140);
+
+  const operation = textField(inputRecord, "operation");
+  if (operation) {
+    const resources = stringArrayField(inputRecord, "resources");
+    return resources.length > 0
+      ? operation + ". Resources: " + resources.slice(0, 4).join(", ")
+      : operation;
+  }
+
+  const goal = textField(inputRecord, "goal") ?? textField(inputRecord, "objective");
+  if (goal) return "Goal: " + truncateText(goal, 140);
+
+  const subAgentName = textField(inputRecord, "name") ?? textField(inputRecord, "subAgentId");
+  const message = textField(inputRecord, "message") ?? textField(inputRecord, "prompt") ?? textField(inputRecord, "task");
+  if (subAgentName && message) return subAgentName + ": " + truncateText(message, 140);
+  if (message) return truncateText(message, 160);
+
+  const codeTask = codeTaskSummary(input);
+  if (codeTask) return codeTask;
+
+  if (normalized === "getUserTimezone") return "Uses the browser timezone for date and time grounding.";
+  return null;
+}
+
+function toolOutcomeSummary(state: string, output: unknown) {
+  if (state === "waiting-approval") return "Waiting for your decision before continuing.";
+  if (state === "expired-approval") return "Older approval. Send a fresh request to run this again.";
+  if (state === "denied") return "Rejected by owner.";
+  if (state === "input-streaming" || state === "input-available" || state === "streaming") return "Preparing the tool request.";
+  if (state === "approved" || state === "approval-responded") return "Approval recorded. Waiting for the result.";
+
+  const outputSummary = summarizeToolOutput(output);
+  if (outputSummary) return outputSummary;
+  if (state === "output-error" || state === "error") return "Tool returned an error.";
+  if (state === "output-available" || state === "complete") return "Completed.";
+  return null;
+}
+
+function summarizeToolOutput(output: unknown): string | null {
+  if (!output) return null;
+
+  const text = toolContentText(output);
+  if (text) {
+    const parsed = parseJsonText(text);
+    if (parsed !== null) return summarizeParsedToolOutput(parsed);
+    return truncateText(normalizeWhitespace(text), 220);
+  }
+
+  return summarizeParsedToolOutput(output);
+}
+
+function summarizeParsedToolOutput(value: unknown): string {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "No matching results.";
+    const endpoints = value.map(endpointSummary).filter((item): item is string => Boolean(item));
+    if (endpoints.length > 0) {
+      return "Found " + pluralize(value.length, "endpoint") + ": " + formatInlineList(endpoints, 3);
+    }
+    return "Returned " + pluralize(value.length, "item") + ".";
+  }
+
+  const record = asRecord(value);
+  if (!record) return truncateText(normalizeWhitespace(String(value)), 220);
+
+  const error = textField(record, "error") ?? textField(record, "message");
+  if (error && (record.success === false || "error" in record)) return "Error: " + truncateText(error, 180);
+
+  const result = record.result;
+  const resultRecord = asRecord(result);
+  if (resultRecord) {
+    const url = textField(resultRecord, "url") ?? textField(resultRecord, "deployment_url");
+    if (url) return "Created or updated resource: " + url;
+
+    const name = textField(resultRecord, "name") ?? textField(resultRecord, "id");
+    if (name && record.success === true) return "Cloudflare API succeeded for " + name + ".";
+  }
+
+  if (record.success === true) return "Cloudflare API request succeeded.";
+  if (record.success === false) return "Cloudflare API request failed.";
+
+  const nestedText = toolContentText(record);
+  if (nestedText && nestedText !== String(value)) return truncateText(normalizeWhitespace(nestedText), 220);
+  return "Returned structured data.";
+}
+
+function endpointSummary(value: unknown): string | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const method = textField(record, "method")?.toUpperCase();
+  const path = textField(record, "path");
+  const summary = textField(record, "summary");
+  if (!method && !path) return null;
+  return [method, path, summary ? "- " + summary : null].filter(Boolean).join(" ");
+}
+
+function toolContentText(value: unknown): string | null {
+  const record = asRecord(value);
+  if (!record) return typeof value === "string" ? value : null;
+
+  const content = record.content;
+  if (Array.isArray(content)) {
+    const textParts = content
+      .map((item) => {
+        const itemRecord = asRecord(item);
+        return itemRecord && itemRecord.type === "text" ? textField(itemRecord, "text") : null;
+      })
+      .filter(Boolean);
+    if (textParts.length > 0) return textParts.join("\n\n");
+  }
+
+  return textField(record, "text");
+}
+
+function codeTaskSummary(input: unknown) {
+  const record = asRecord(input);
+  const code = record ? textField(record, "code") : null;
+  if (!code) return null;
+
+  const comment = firstCodeComment(code);
+  if (comment) return truncateText(comment, 180);
+
+  const requestTarget = firstCloudflareRequestTarget(code);
+  return requestTarget ? "Cloudflare API request: " + requestTarget : "Inline tool code.";
+}
+
+function firstCodeComment(code: string) {
+  for (const rawLine of code.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith("//")) continue;
+    const comment = line.replace(/^\/\/+/, "").trim();
+    if (comment) return sentenceCase(comment);
+  }
+  return null;
+}
+
+function firstCloudflareRequestTarget(code: string) {
+  const methodMatch = code.match(/method:\s*["']([A-Z]+)["']/);
+  const pathMatch = code.match(/path:\s*`([^`]+)`|path:\s*["']([^"']+)["']/);
+  const method = methodMatch?.[1];
+  const path = pathMatch?.[1] ?? pathMatch?.[2];
+  if (!method && !path) return null;
+  return [method, path].filter(Boolean).join(" ");
+}
+
+function normalizeToolName(toolName: string) {
+  return toolName
+    .replace(/^functions\./, "")
+    .replace(/^tool_[A-Za-z0-9]+_/, "");
+}
+
+function parseJsonText(text: string): unknown | null {
+  const trimmed = text.trim();
+  if (!trimmed || !/^[\[{"]/.test(trimmed)) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function textField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function stringArrayField(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
+function formatInlineList(items: string[], limit: number) {
+  const visible = items.slice(0, limit);
+  const suffix = items.length > limit ? " +" + String(items.length - limit) + " more" : "";
+  return visible.join("; ") + suffix;
+}
+
+function pluralize(count: number, noun: string) {
+  return String(count) + " " + noun + (count === 1 ? "" : "s");
+}
+
+function sentenceCase(text: string) {
+  const trimmed = normalizeWhitespace(text);
+  return trimmed ? trimmed.charAt(0).toUpperCase() + trimmed.slice(1) : trimmed;
+}
+
+function titleCaseWords(text: string) {
+  return text
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function normalizeWhitespace(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function truncateText(text: string, maxLength: number) {
+  const normalized = normalizeWhitespace(text);
+  return normalized.length <= maxLength ? normalized : normalized.slice(0, maxLength - 1).trimEnd() + "...";
 }
 
 function toolSummaryState(part: UIMessage["parts"][number], activeApprovalIds: ReadonlySet<string>) {
