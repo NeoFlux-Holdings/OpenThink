@@ -83,10 +83,9 @@ Known evidence gaps:
 - The `/get-messages` and `/chat-history` read-route fix plus the non-blocking Agents SDK warmup fix were uploaded through the current OpenThink `/sync` target on 2026-05-14. A fresh authenticated Chrome tab showed `CONNECTED`, no socket error, enabled composer, no app-side console errors, and a live no-tool probe returned `OK`.
 - The sync UI now has a manual known-target fallback so Cloudflare discovery throttling does not strand the user with disabled update controls. If account-wide discovery is rate-limited, the user can enter deployment ID, script name, account ID, and agent URL, then run the same update/reconcile flow against that single Worker.
 - Stripe Projects zero-touch Cloudflare account creation, billing-profile setup, and automated domain purchase are not implemented end to end because the public repo does not have an official external orchestration contract to call. The current route correctly fails closed.
-- The current pass is local plus live-deployed verification, but still needs a final commit and push to publish the repo state.
+- The current pass was committed, pushed, and uploaded through the current OpenThink `/sync` target on 2026-05-14. Local `HEAD`, `origin/main`, and the deployed runtime source matched `a02d402ed160c9cd7d5205ee48141a0c5f23718a` after the final upload.
 
 ## Highest-Value Remaining Work
 
 1. Run `/browser/diagnostics` with the live check after refreshing Browser Rendering/API access, then document any account-specific CDP websocket constraints.
 2. Finish Stripe-to-Cloudflare account onboarding once the external purchase flow is available. The repo now covers Registrar discovery/check/guarded registration/status tracking for existing Cloudflare accounts, but not automatic account creation or billing-profile setup.
-3. Commit and push the current OpenThink branch after final validation so deployed/repo state stay aligned.
