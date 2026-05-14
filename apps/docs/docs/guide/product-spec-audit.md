@@ -83,7 +83,7 @@ Known evidence gaps:
 - The `/get-messages` and `/chat-history` read-route fix plus the non-blocking Agents SDK warmup fix were uploaded through the current OpenThink `/sync` target on 2026-05-14. A fresh authenticated Chrome tab showed `CONNECTED`, no socket error, enabled composer, no app-side console errors, and a live no-tool probe returned `OK`.
 - The sync UI now has a manual known-target fallback so Cloudflare discovery throttling does not strand the user with disabled update controls. If account-wide discovery is rate-limited, the user can enter deployment ID, script name, account ID, and agent URL, then run the same update/reconcile flow against that single Worker.
 - Stripe Projects zero-touch Cloudflare account creation, billing-profile setup, and automated domain purchase are not implemented end to end because the public repo does not have an official external orchestration contract to call. The current route correctly fails closed.
-- The current pass was committed, pushed, and uploaded through the current OpenThink `/sync` target on 2026-05-14. Local `HEAD`, `origin/main`, and the deployed runtime source matched `a02d402ed160c9cd7d5205ee48141a0c5f23718a` after the final upload.
+- The runtime-bearing pass was committed, pushed, and uploaded through the current OpenThink `/sync` target on 2026-05-14 at `a02d402ed160c9cd7d5205ee48141a0c5f23718a`. Later docs-only audit updates do not change the deployed Worker runtime.
 
 ## Highest-Value Remaining Work
 
